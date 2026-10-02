@@ -52,7 +52,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif text == "📚 Найти информацию":
         context.user_data["mode"] = "search"
-         await update.message.reply_text(
+        await update.message.reply_text(
             "📚 Что хочешь найти?\n\n"
             "Напиши тему, материал, бренд, клеймо или технику — "
             "а я попробую привести тебя к нужному разделу школы. 🔎"
