@@ -51,10 +51,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "я буду вести тебя по шагам. 😈"
         )
     elif text == "📚 Найти информацию":
+        context.user_data["mode"] = "search"
          await update.message.reply_text(
             "📚 Что хочешь найти?\n\n"
             "Напиши тему, материал, бренд, клеймо или технику — "
             "а я попробую привести тебя к нужному разделу школы. 🔎"
+        )
+    elif context.user_data.get("mode") == "search":
+        query = text
+        context.user_data["mode"] = None
+        await update.message.reply_text(
+            f"🔎 Ищу информацию по запросу: {query}\n\n"
+            "Пока я учусь искать по базе школы. 😈"
         )
 def main():
     app = Application.builder().token(TOKEN).build()
