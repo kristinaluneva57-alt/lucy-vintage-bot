@@ -34,7 +34,7 @@ def main():
     app.run_polling()
     
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = update.message.text
+    text = update.message.text
 
     if text == "🔎 Определить украшение":
         await update.message.reply_text(
