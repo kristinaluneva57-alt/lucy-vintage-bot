@@ -50,7 +50,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Не переживай, если не знаешь, что именно фотографировать — "
             "я буду вести тебя по шагам. 😈"
         )
-     elif text == "📚 Найти информацию":
+    elif text == "📚 Найти информацию":
          await update.message.reply_text(
             "📚 Что хочешь найти?\n\n"
             "Напиши тему, материал, бренд, клеймо или технику — "
