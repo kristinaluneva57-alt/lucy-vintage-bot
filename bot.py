@@ -55,7 +55,16 @@ def init_db():
     conn.commit()
     conn.close()
     
-def save_item(measurements, weight, provenance, seller_story):
+def save_item(
+    measurements,
+    weight,
+    provenance,
+    seller_story,
+    front_photo,
+    back_photo,
+    mark_photo,
+    details_photo
+):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
