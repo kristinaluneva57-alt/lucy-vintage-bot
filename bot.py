@@ -101,6 +101,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 Люся: Можно даже начать с «я не знаю, как эта зараза называется». Разберёмся. 😏"
         )
 
+    elif text == "💬 Vintage Club":
+        await update.message.reply_text(
+            "💬 VINTAGE CLUB\n\n"
+            "Место, где можно обсуждать находки, показывать покупки, "
+            "спрашивать мнение и разбирать винтаж вместе. ✨\n\n"
+            "Здесь будут:\n"
+            "💎 находки участников\n"
+            "🔎 помощь с атрибуцией\n"
+            "💰 «А вы бы купили за эту цену?»\n"
+            "🤦‍♀️ наши ошибки и сомнительные покупки\n"
+            "🏆 находка месяца и маленькие челленджи\n\n"
+            "💬 Люся: Иногда лучший способ понять, что ты купила, — "
+            "показать это людям и коллективно охренеть. 😏"
+        )
     elif context.user_data.get("mode") == "find" and text not in sum(MAIN_MENU, []):
         query = text
         context.user_data["mode"] = None
