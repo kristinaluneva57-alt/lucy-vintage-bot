@@ -76,13 +76,90 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "или другой характерной детали."
             )
             return
-        if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "mark_photo"
-        and text == "🚫 Клейма нет"
-    ):
-            context.user_data["step"] = "details_photo"
+        if step == "details_photo":
+            context.user_data["step"] = "measurements"
             await update.message.reply_text(
+                "Деталь получила. 🔎✨\n\n"
+                "Теперь запишем размеры украшения.\n\n"
+                "📏 Измерь максимальную высоту и ширину и напиши их в миллиметрах.\n"
+                "Например: 52 × 38 мм.\n\n"
+                "💬 Люся: Если линейки сейчас нет — ничего страшного, этот шаг можно будет пропустить."
+            )
+            return
+        if (
+            context.user_data.get("mode") == "identify"
+            and context.user_data.get("step") == "measurements"
+        ):
+            context.user_data["measurements"] = text
+            context.user_data["step"] = "weight"
+
+            await update.message.reply_text(
+            f"Размеры записала: {text} 📏✨\n\n"
+            "Теперь вес.\n"
+            "Если есть весы — напиши вес украшения в граммах.\n"
+            "Например: 24.6 г.\n\n"
+            "Если весов нет — просто напиши «нет»."
+    )
+    return
+        if (
+            context.user_data.get("mode") == "identify"
+            and context.user_data.get("step") == "weight"
+        ):
+            context.user_data["weight"] = text
+            context.user_data["step"] = "provenance"
+
+            await update.message.reply_text(
+                      f"Вес записала: {text} ⚖️✨\n\n"
+                      "Теперь немного истории.\n"
+                      "Напиши, где ты нашла или купила это украшение.\n\n"
+                      "Например: блошиный рынок в Германии, антикварный магазин, "
+                      "Vinted, наследство или что-то другое.\n\n"
+                      "Если знаешь город или страну — тоже напиши. 📍"
+            )
+            return
+         if (
+              context.user_data.get("mode") == "identify"
+              and context.user_data.get("step") == "provenance"
+         ):
+              context.user_data["provenance"] = text
+              context.user_data["step"] = "seller_story"
+
+              await update.message.reply_text(
+                  f"Записала происхождение: {text} 📍✨\n\n"
+                  "А теперь — история продавца.\n"
+                  "Что тебе рассказывали об этом украшении?\n\n"
+                  "Например: «принадлежало бабушке», «привезено из Франции», "
+                  "«это точно 1930-е» и так далее.\n\n"
+                  "Если ничего не рассказывали — просто напиши «нет».\n\n"
+                  "💬 Люся: Историю продавца сохраняем отдельно. "
+                  "Это зацепка, а не доказательство. 🔎"
+              )
+              return
+         if (
+              context.user_data.get("mode") == "identify"
+              and context.user_data.get("step") == "seller_story"
+         ):
+              context.user_data["seller_story"] = text
+              context.user_data["step"] = "complete"
+
+              await update.message.reply_text(
+                  "Готово. 🔎✨\n\n"
+                  "Я собрала основные данные об украшении:\n\n"
+                  f"📏 Размеры: {context.user_data.get('measurements', 'не указаны')}\n"
+                  f"⚖️ Вес: {context.user_data.get('weight', 'не указан')}\n"
+                  f"📍 Происхождение: {context.user_data.get('provenance', 'не указано')}\n"
+                  f"💬 Со слов продавца: {text}\n\n"
+                  "Фотографии и все зацепки тоже прошли по этапам.\n"
+                  "Теперь из этого можно собирать карточку находки. 🗂✨"
+              )
+              return
+         if (
+         context.user_data.get("mode") == "identify"
+         and context.user_data.get("step") == "mark_photo"
+         and text == "🚫 Клейма нет"
+     ):
+             context.user_data["step"] = "details_photo"
+             await update.message.reply_text(
                 "Поняла — клейма нет. Это нормально. 👍\n\n"
                 "Отсутствие клейма ещё ничего не говорит о возрасте "
                 "или происхождении украшения.\n\n"
