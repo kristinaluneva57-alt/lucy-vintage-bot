@@ -92,6 +92,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
             "но у меня работа такая. 😏"
         )
+        elif text == "🆘 Найди мне это":
+        context.user_data["mode"] = "find"
+        await update.message.reply_text(
+            "🆘 НАЙДИ МНЕ ЭТО\n\n"
+            "Ищешь конкретное украшение, бренд, книгу, каталог или что-то ещё?\n\n"
+            "Напиши мне, что именно нужно найти. Чем больше деталей — тем лучше. 🔎\n\n"
+            "💬 Люся: Можно даже начать с «я не знаю, как эта зараза называется». Разберёмся. 😏"
+        )
+
+    elif context.user_data.get("mode") == "find" and text not in sum(MAIN_MENU, []):
+        query = text
+        context.user_data["mode"] = None
+        await update.message.reply_text(
+            f"🔎 Приняла запрос:\n\n«{query}»\n\n"
+            "Я запомнила, что именно мы ищем. "
+            "Сам настоящий поиск по источникам подключим следующим этапом. 😈"
+        )
     elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
         query = text
         context.user_data["mode"] = None
