@@ -99,6 +99,45 @@ def get_item(item_code):
     conn.close()
 
     return item
+async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    item_code = query.data.split(":", 1)[1]
+    item = get_item(item_code)
+
+    if not item:
+        await query.message.reply_text(
+            "Не смогла найти эту карточку в шкатулке. 🔎"
+        )
+        return
+
+    (
+        item_code,
+        measurements,
+        weight,
+        provenance,
+        seller_story,
+        attribution_status
+    ) = item
+
+    card = (
+        "✦ OH MY GOD VINTAGE ARCHIVE ✦\n\n"
+        f"💎 {item_code}\n"
+        "Карточка находки\n\n"
+        "─── ПАСПОРТ ПРЕДМЕТА ───\n"
+        f"📏 Размер: {measurements}\n"
+        f"⚖️ Вес: {weight}\n"
+        f"📍 Происхождение: {provenance}\n\n"
+        "─── АТРИБУЦИЯ ───\n"
+        f"◇ Статус: {attribution_status}\n\n"
+        "─── ИСТОРИЯ ПРОДАВЦА ───\n"
+        f"{seller_story}\n\n"
+        "─── ДОКАЗАТЕЛЬСТВА И ЗАЦЕПКИ ───\n"
+        "Пока не добавлены."
+    )
+
+    await query.message.reply_text(card)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
