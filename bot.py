@@ -86,63 +86,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💬 Люся: Если линейки сейчас нет — ничего страшного, этот шаг можно будет пропустить."
             )
             return
-        if (
-            context.user_data.get("mode") == "identify"
-            and context.user_data.get("step") == "measurements"
-        ):
-            context.user_data["measurements"] = text
-            context.user_data["step"] = "weight"
+    if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "measurements"
+    ):
+        context.user_data["measurements"] = text
+        context.user_data["step"] = "weight"
 
-            await update.message.reply_text(
+        await update.message.reply_text(
             f"Размеры записала: {text} 📏✨\n\n"
             "Теперь вес.\n"
             "Если есть весы — напиши вес украшения в граммах.\n"
             "Например: 24.6 г.\n\n"
             "Если весов нет — просто напиши «нет»."
-    )
-    return
-        if (
-            context.user_data.get("mode") == "identify"
-            and context.user_data.get("step") == "weight"
-        ):
-            context.user_data["weight"] = text
-            context.user_data["step"] = "provenance"
-
-            await update.message.reply_text(
-                      f"Вес записала: {text} ⚖️✨\n\n"
-                      "Теперь немного истории.\n"
-                      "Напиши, где ты нашла или купила это украшение.\n\n"
-                      "Например: блошиный рынок в Германии, антикварный магазин, "
-                      "Vinted, наследство или что-то другое.\n\n"
-                      "Если знаешь город или страну — тоже напиши. 📍"
             )
+        return
+    if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "weight"
+    ):
+        context.user_data["weight"] = text
+        context.user_data["step"] = "provenance"
+
+        await update.message.reply_text(
+             f"Вес записала: {text} ⚖️✨\n\n"
+             "Теперь немного истории.\n"
+             "Напиши, где ты нашла или купила это украшение.\n\n"
+             "Например: блошиный рынок в Германии, антикварный магазин, "
+             "Vinted, наследство или что-то другое.\n\n"
+             "Если знаешь город или страну — тоже напиши. 📍"
+       )
+         return
+     if (
+         context.user_data.get("mode") == "identify"
+         and context.user_data.get("step") == "provenance"
+         ):
+          context.user_data["provenance"] = text
+          context.user_data["step"] = "seller_story"
+
+          await update.message.reply_text(
+              f"Записала происхождение: {text} 📍✨\n\n"
+              "А теперь — история продавца.\n"
+              "Что тебе рассказывали об этом украшении?\n\n"
+              "Например: «принадлежало бабушке», «привезено из Франции», "
+              "«это точно 1930-е» и так далее.\n\n"
+              "Если ничего не рассказывали — просто напиши «нет».\n\n"
+              "💬 Люся: Историю продавца сохраняем отдельно. "
+              "Это зацепка, а не доказательство. 🔎"
+         )
             return
-         if (
-              context.user_data.get("mode") == "identify"
-              and context.user_data.get("step") == "provenance"
-         ):
-              context.user_data["provenance"] = text
-              context.user_data["step"] = "seller_story"
+    if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "seller_story"
+    ):
+        context.user_data["seller_story"] = text
+        context.user_data["step"] = "complete"
 
-              await update.message.reply_text(
-                  f"Записала происхождение: {text} 📍✨\n\n"
-                  "А теперь — история продавца.\n"
-                  "Что тебе рассказывали об этом украшении?\n\n"
-                  "Например: «принадлежало бабушке», «привезено из Франции», "
-                  "«это точно 1930-е» и так далее.\n\n"
-                  "Если ничего не рассказывали — просто напиши «нет».\n\n"
-                  "💬 Люся: Историю продавца сохраняем отдельно. "
-                  "Это зацепка, а не доказательство. 🔎"
-              )
-              return
-         if (
-              context.user_data.get("mode") == "identify"
-              and context.user_data.get("step") == "seller_story"
-         ):
-              context.user_data["seller_story"] = text
-              context.user_data["step"] = "complete"
-
-              await update.message.reply_text(
+        await update.message.reply_text(
                   "Готово. 🔎✨\n\n"
                   "Я собрала основные данные об украшении:\n\n"
                   f"📏 Размеры: {context.user_data.get('measurements', 'не указаны')}\n"
@@ -152,8 +152,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   "Фотографии и все зацепки тоже прошли по этапам.\n"
                   "Теперь из этого можно собирать карточку находки. 🗂✨"
               )
-              return
-         if (
+        return
+    if (
          context.user_data.get("mode") == "identify"
          and context.user_data.get("step") == "mark_photo"
          and text == "🚫 Клейма нет"
