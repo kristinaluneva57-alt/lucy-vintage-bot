@@ -69,6 +69,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▶️ НАЧАТЬ УРОК:\n"
             "https://kristinaluneva57-alt.github.io/oh-my-god-vintage/"
         )
+    elif text == "🏛 Разделы школы":
+         await update.message.reply_text(
+            "🏛 OH MY GOD VINTAGE SCHOOL\n\n"
+            "Добро пожаловать в энциклопедию винтажных украшений. ✨\n"
+            "Здесь мы собираем всё — от эпох и материалов до клейм, "
+            "подделок, дизайнеров и реальных расследований.\n\n"
+            "🕰 МАШИНА ВРЕМЕНИ\n"
+            "💎 ЛАБОРАТОРИЯ МАТЕРИАЛОВ\n"
+            "👑 ДОМ МОДЫ — БРЕНДЫ И ДИЗАЙНЕРЫ\n"
+            "🔎 АРХИВ КЛЕЙМ\n"
+            "🧷 АНАТОМИЯ УКРАШЕНИЯ\n"
+            "🕵️ VINTAGE CRIME — ПОДДЕЛКИ\n"
+            "🏺 МАСТЕРСКАЯ — ТЕХНИКИ\n"
+            "📚 СЕКРЕТНАЯ БИБЛИОТЕКА\n"
+            "💰 СКОЛЬКО ЭТО СТОИТ?\n"
+            "🛒 ОХОТА — ГДЕ И КАК ПОКУПАТЬ\n"
+            "💸 ОТ НАХОДКИ ДО ПРОДАЖИ\n"
+            "🔬 VINTAGE LAB — ПРАКТИКУМ\n"
+            "🔥 НАШИ РАССЛЕДОВАНИЯ\n"
+            "🧭 ОПРЕДЕЛИТЕЛЬ\n\n"
+            "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
+            "но у меня работа такая. 😏"
+        )
     elif context.user_data.get("mode") == "search":
         query = text
         context.user_data["mode"] = None
