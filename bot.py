@@ -188,6 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         if step == "back_photo":
+            context.user_data["front_photo"] = update.message.photo[-1].file_id
             context.user_data["step"] = "mark_photo"
             mark_keyboard = ReplyKeyboardMarkup(
                 [["🚫 Клейма нет"]],
@@ -204,6 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if step == "mark_photo":
+            context.user_data["mark_photo"] = update.message.photo[-1].file_id
             context.user_data["step"] = "details_photo"
             await update.message.reply_text(
                 "Фото маркировки получила. 🔎✨\n\n"
@@ -214,6 +216,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if step == "details_photo":
+            context.user_data["details_photo"] = update.message.photo[-1].file_id
             context.user_data["step"] = "measurements"
             await update.message.reply_text(
                 "Деталь получила. 🔎✨\n\n"
