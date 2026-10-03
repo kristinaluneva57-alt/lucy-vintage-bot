@@ -22,6 +22,7 @@ MAIN_MENU = [
 ]
 
 def init_db():
+    
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
@@ -159,6 +160,9 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attribution_status,
         front_photo
     ) = item
+    
+    if front_photo:
+        await query.message.reply_photo(photo=front_photo)
 
     card = (
         "✦ OH MY GOD VINTAGE ARCHIVE ✦\n\n"
