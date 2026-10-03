@@ -38,17 +38,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if update.message.photo:
+        if context.user_data.get("mode") == "identify":
+            step = context.user_data.get("step")
 
-    if text == "🔎 Определить украшение":
+            if step == "front_photo":
+                context.user_data["step"] = "back_photo"
+                await update.message.reply_text(
+                    "Фото лицевой стороны получила. 📸✨\n\n"
+                    "Теперь переверни украшение и пришли фото оборота целиком.\n\n"
+                    "💬 Люся: Не обрезай застёжку и края — сзади иногда интереснее, чем спереди. 😏"
+                )
+                return
+        if step == "back_photo":
+            context.user_data["step"] = "mark_photo"
+            mark_keyboard = ReplyKeyboardMarkup(
+                [["🚫 Клейма нет"]],
+                resize_keyboard=True
+            )
+            await update.message.reply_text(
+                "Оборот получила. 🔄✨\n\n"
+                "Теперь посмотрим маркировку.\n"
+                "Если есть клеймо, подпись, буквы, цифры или странный значок — "
+                "пришли его отдельным фото крупным планом.\n\n"
+                "💬 Люся: Если камера не фокусируется, немного отодвинь телефон. "
+                "Резкое фото издалека полезнее размытого макро. 🔎",
+                 reply_markup=mark_keyboard
+            )
+            return
+                if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "mark_photo"
+        and text == "🚫 Клейма нет"
+    ):
+        context.user_data["step"] = "details_photo"
         await update.message.reply_text(
-            "🔎 Отлично. Начинаем исследование.\n\n"
-            "Пришли мне фотографии украшения:\n"
-            "1. 📸 Общий вид\n"
-            "2. 🔄 Оборотную сторону\n"
-            "3. 🔍 Клеймо крупным планом, если оно есть\n"
-            "4. 🔗 Застёжку, крепления и необычные детали\n\n"
-            "Не переживай, если не знаешь, что именно фотографировать — "
-            "я буду вести тебя по шагам. 😈"
+            "Поняла — клейма нет. Это нормально. 👍\n\n"
+            "Отсутствие клейма ещё ничего не говорит о возрасте "
+            "или происхождении украшения.\n\n"
+            "Теперь пришли крупное фото застёжки, шарнира, креплений "
+            "или других необычных деталей. 🔎"
+        )
+        return
+    if text == "🔎 Определить украшение":
+        context.user_data["mode"] = "identify"
+        context.user_data["step"] = "front_photo"
+        await update.message.reply_text(
+            "🔎 ОПРЕДЕЛИТЬ УКРАШЕНИЕ\n\n"
+            "Начинаем с лицевой стороны.\n\n"
+            "📸 Пришли одно фото украшения целиком.\n\n"
+            "💬 Люся: Маленький секрет хорошей фотографии — "
+            "протри камеру телефона. Серьёзно. 😂\n"
+            "Лучше всего снимать при дневном свете возле окна, без вспышки."
         )
     elif text == "📚 Найти информацию":
         context.user_data["mode"] = "search"
@@ -136,6 +177,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )    
+    
+    app.add_handler(
+        MessageHandler(filters.PHOTO, handle_message)
     )
 
     app.run_polling()
