@@ -92,7 +92,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
             "но у меня работа такая. 😏"
         )
-        elif text == "🆘 Найди мне это":
+    elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
         await update.message.reply_text(
             "🆘 НАЙДИ МНЕ ЭТО\n\n"
