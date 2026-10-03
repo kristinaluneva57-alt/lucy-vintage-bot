@@ -66,6 +66,19 @@ def save_item(measurements, weight, provenance, seller_story):
     conn.close()
 
     return item_code
+def get_items():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT item_code, measurements, weight FROM items ORDER BY id DESC"
+    )
+
+    items = cursor.fetchall()
+    conn.close()
+
+    return items
+    
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
