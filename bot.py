@@ -36,6 +36,22 @@ def init_db():
         )
         """
     )
+    columns = [
+        ("front_photo", "TEXT"),
+        ("back_photo", "TEXT"),
+        ("mark_photo", "TEXT"),
+        ("details_photo", "TEXT"),
+    ]
+
+    existing_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(items)")
+    }
+
+    for column_name, column_type in columns:
+        if column_name not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE items ADD COLUMN {column_name} {column_type}"
+            )
     conn.commit()
     conn.close()
     
