@@ -117,14 +117,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "Если знаешь город или страну — тоже напиши. 📍"
        )
         return
-     if (
-         context.user_data.get("mode") == "identify"
-         and context.user_data.get("step") == "provenance"
-         ):
-          context.user_data["provenance"] = text
-          context.user_data["step"] = "seller_story"
+    if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "provenance"
+    ):
+        context.user_data["provenance"] = text
+        context.user_data["step"] = "seller_story"
 
-          await update.message.reply_text(
+        await update.message.reply_text(
               f"Записала происхождение: {text} 📍✨\n\n"
               "А теперь — история продавца.\n"
               "Что тебе рассказывали об этом украшении?\n\n"
@@ -133,8 +133,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "Если ничего не рассказывали — просто напиши «нет».\n\n"
               "💬 Люся: Историю продавца сохраняем отдельно. "
               "Это зацепка, а не доказательство. 🔎"
-         )
-            return
+        )
+        return
     if (
         context.user_data.get("mode") == "identify"
         and context.user_data.get("step") == "seller_story"
