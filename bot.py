@@ -107,7 +107,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🔎 Приняла запрос:\n\n«{query}»\n\n"
             "Я запомнила, что именно мы ищем. "
-            "Сам настоящий поиск по источникам подключим следующим этапом. 😈"
+            "Я посмотрю, что можно найти по этому запросу. 😈"
         )
     elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
         query = text
