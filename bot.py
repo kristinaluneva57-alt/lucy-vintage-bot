@@ -126,7 +126,7 @@ def get_item(item_code):
     cursor.execute(
         """
         SELECT item_code, measurements, weight, provenance,
-               seller_story, attribution_status
+               seller_story, attribution_status, front_photo
         FROM items
         WHERE item_code = ?
         """,
@@ -156,7 +156,8 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         weight,
         provenance,
         seller_story,
-        attribution_status
+        attribution_status,
+        front_photo
     ) = item
 
     card = (
