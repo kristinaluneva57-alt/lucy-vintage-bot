@@ -116,7 +116,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "Vinted, наследство или что-то другое.\n\n"
              "Если знаешь город или страну — тоже напиши. 📍"
        )
-         return
+        return
      if (
          context.user_data.get("mode") == "identify"
          and context.user_data.get("step") == "provenance"
