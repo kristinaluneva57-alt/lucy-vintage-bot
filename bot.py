@@ -69,7 +69,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▶️ НАЧАТЬ УРОК:\n"
             "https://kristinaluneva57-alt.github.io/oh-my-god-vintage/"
         )
-    elif text == "🏛 Разделы школы":
+    elif text == "🧭 Разделы школы":
          await update.message.reply_text(
             "🏛 OH MY GOD VINTAGE SCHOOL\n\n"
             "Добро пожаловать в энциклопедию винтажных украшений. ✨\n"
