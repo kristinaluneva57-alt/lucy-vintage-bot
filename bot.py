@@ -92,10 +92,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
             "но у меня работа такая. 😏"
         )
-    elif context.user_data.get("mode") == "search":
+    elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
         query = text
         context.user_data["mode"] = None
-        await update.message.reply_text(
+          await update.message.reply_text(
             f"🔎 Ищу информацию по запросу: {query}\n\n"
             "Пока я учусь искать по базе школы. 😈"
         )
