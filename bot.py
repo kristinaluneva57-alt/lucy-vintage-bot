@@ -57,6 +57,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Напиши тему, материал, бренд, клеймо или технику — "
             "а я попробую привести тебя к нужному разделу школы. 🔎"
         )
+            elif text == "🎓 Учиться":
+        await update.message.reply_text(
+            "🎓 OH MY GOD VINTAGE SCHOOL\n\n"
+            "Здесь не будет лекции на два часа и экзамена в пятницу. 😏\n"
+            "Учимся короткими интерактивными уроками на реальных украшениях.\n\n"
+            "🔍 УРОВЕНЬ 1 — НАУЧИСЬ ВИДЕТЬ\n"
+            "Урок 1 из 10\n"
+            "«Не хватай сразу 😂»\n\n"
+            "⏱ 2–3 минуты\n\n"
+            "▶️ НАЧАТЬ УРОК:\n"
+            "https://kristinaluneva57-alt.github.io/oh-my-god-vintage/"
+        )
     elif context.user_data.get("mode") == "search":
         query = text
         context.user_data["mode"] = None
