@@ -66,7 +66,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  reply_markup=mark_keyboard
             )
             return
-                    if step == "mark_photo":
+        if step == "mark_photo":
             context.user_data["step"] = "details_photo"
             await update.message.reply_text(
                 "Фото маркировки получила. 🔎✨\n\n"
