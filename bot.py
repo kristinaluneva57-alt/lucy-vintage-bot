@@ -211,7 +211,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (
         context.user_data.get("mode") == "identify"
         and context.user_data.get("step") == "mark_photo"
-        and text == "🚫 Клейма нет"
+        and text and text.strip().lower() in ["🚫 клейма нет", "клейма нет", "нет клейма", "нет"]
      ):
         context.user_data["step"] = "details_photo"
         await update.message.reply_text(
