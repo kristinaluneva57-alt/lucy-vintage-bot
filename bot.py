@@ -69,16 +69,28 @@ def save_item(
     cursor = conn.cursor()
 
     cursor.execute(
-        """
-        INSERT INTO items (
-            measurements,
-            weight,
-            provenance,
-            seller_story
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (measurements, weight, provenance, seller_story)
+    """
+    INSERT INTO items (
+        measurements,
+        weight,
+        provenance,
+        seller_story,
+        front_photo,
+        back_photo,
+        mark_photo,
+        details_photo
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+    (
+        measurements,
+        weight,
+        provenance,
+        seller_story,
+        front_photo,
+        back_photo,
+        mark_photo,
+        details_photo
     )
 
     item_id = cursor.lastrowid
