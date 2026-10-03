@@ -80,6 +80,24 @@ def get_items():
 
     return items
     
+def get_item(item_code):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT item_code, measurements, weight, provenance,
+               seller_story, attribution_status
+        FROM items
+        WHERE item_code = ?
+        """,
+        (item_code,)
+    )
+
+    item = cursor.fetchone()
+    conn.close()
+
+    return item
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
