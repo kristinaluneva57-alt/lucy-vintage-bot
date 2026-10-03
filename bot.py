@@ -416,8 +416,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
-        app.add_handler(
+    app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
+    app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )    
     
