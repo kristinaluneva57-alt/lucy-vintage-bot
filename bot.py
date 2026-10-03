@@ -113,7 +113,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤦‍♀️ наши ошибки и сомнительные покупки\n"
             "🏆 находка месяца и маленькие челленджи\n\n"
             "💬 Люся: Иногда лучший способ понять, что ты купила, — "
-            "показать это людям и коллективно охренеть. 😏"
+            "показать это людям и коллективно удивиться. 😏"
         )
     elif context.user_data.get("mode") == "find" and text not in sum(MAIN_MENU, []):
         query = text
