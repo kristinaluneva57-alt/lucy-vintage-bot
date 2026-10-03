@@ -16,7 +16,8 @@ DB_PATH = "/data/lucy_vintage.db"
 MAIN_MENU = [
     ["🔎 Определить украшение", "📚 Найти информацию"],
     ["🆘 Найди мне это", "🎓 Учиться"],
-    ["🧭 Разделы школы", "💬 Vintage Club"],
+    ["🧭 Разделы школы", "🗃 Моя шкатулка"],
+    ["💬 Vintage Club"],
 ]
 
 def init_db():
@@ -288,6 +289,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
             "но у меня работа такая. 😏"
         )
+     elif text == "🗃 Моя шкатулка":
+        items = get_items()
+
+        if not items:
+            await update.message.reply_text(
+                "🗃 Твоя шкатулка пока пустая.\n\n"
+                "Добавь первую находку через «🔎 Определить украшение»."
+            )
+            return
+
+        message = "🗃 МОЯ ШКАТУЛКА\n\n"
+
+        for item_code, measurements, weight in items:
+            message += (
+                f"💎 {item_code}\n"
+                f"📏 {measurements}\n"
+                f"⚖️ {weight}\n\n"
+            )
+
+        await update.message.reply_text(message)
+        return
     elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
         await update.message.reply_text(
