@@ -92,6 +92,7 @@ def save_item(
         mark_photo,
         details_photo
     )
+    )
 
     item_id = cursor.lastrowid
     item_code = f"OMG-{item_id:06d}"
