@@ -57,7 +57,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Напиши тему, материал, бренд, клеймо или технику — "
             "а я попробую привести тебя к нужному разделу школы. 🔎"
         )
-     elif text == "🎓 Учиться":
+    elif text == "🎓 Учиться":
         await update.message.reply_text(
             "🎓 OH MY GOD VINTAGE SCHOOL\n\n"
             "Здесь не будет лекции на два часа и экзамена в пятницу. 😏\n"
