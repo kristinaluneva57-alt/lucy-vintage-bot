@@ -140,18 +140,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and context.user_data.get("step") == "seller_story"
     ):
         context.user_data["seller_story"] = text
+        context.user_data["item_id"] = "OMG-000001"
         context.user_data["step"] = "complete"
 
         await update.message.reply_text(
-                  "Готово. 🔎✨\n\n"
-                  "Я собрала основные данные об украшении:\n\n"
-                  f"📏 Размеры: {context.user_data.get('measurements', 'не указаны')}\n"
-                  f"⚖️ Вес: {context.user_data.get('weight', 'не указан')}\n"
-                  f"📍 Происхождение: {context.user_data.get('provenance', 'не указано')}\n"
-                  f"💬 Со слов продавца: {text}\n\n"
-                  "Фотографии и все зацепки тоже прошли по этапам.\n"
-                  "Теперь из этого можно собирать карточку находки. 🗂✨"
-              )
+            f"🗂 КАРТОЧКА НАХОДКИ — {context.user_data['item_id']}\n\n"
+            "Я собрала основные данные об украшении:\n\n"
+            f"📏 Размеры: {context.user_data.get('measurements', 'не указаны')}\n"
+            f"⚖️ Вес: {context.user_data.get('weight', 'не указан')}\n"
+            f"📍 Происхождение: {context.user_data.get('provenance', 'не указано')}\n"
+            f"💬 Со слов продавца: {text}\n\n"
+            "🔎 Статус атрибуции: не определено\n\n"
+            "Фотографии и все зацепки тоже прошли по этапам.\n"
+            "Теперь из этого можно собирать карточку находки. 🗂✨"
+        )
         return
     if (
         context.user_data.get("mode") == "identify"
@@ -165,7 +167,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "или происхождении украшения.\n\n"
                 "Теперь пришли крупное фото застёжки, шарнира, креплений "
                 "или других необычных деталей. 🔎"
-            )
+        )
         return
     if text == "🔎 Определить украшение":
         context.user_data["mode"] = "identify"
