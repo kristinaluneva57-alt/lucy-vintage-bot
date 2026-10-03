@@ -154,19 +154,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
               )
         return
     if (
-         context.user_data.get("mode") == "identify"
-         and context.user_data.get("step") == "mark_photo"
-         and text == "🚫 Клейма нет"
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") == "mark_photo"
+        and text == "🚫 Клейма нет"
      ):
-             context.user_data["step"] = "details_photo"
-             await update.message.reply_text(
+        context.user_data["step"] = "details_photo"
+        await update.message.reply_text(
                 "Поняла — клейма нет. Это нормально. 👍\n\n"
                 "Отсутствие клейма ещё ничего не говорит о возрасте "
                 "или происхождении украшения.\n\n"
                 "Теперь пришли крупное фото застёжки, шарнира, креплений "
                 "или других необычных деталей. 🔎"
             )
-            return
+        return
     if text == "🔎 Определить украшение":
         context.user_data["mode"] = "identify"
         context.user_data["step"] = "front_photo"
