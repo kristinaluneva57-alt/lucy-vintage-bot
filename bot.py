@@ -179,6 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             step = context.user_data.get("step")
 
             if step == "front_photo":
+                context.user_data["front_photo"] = update.message.photo[-1].file_id
                 context.user_data["step"] = "back_photo"
                 await update.message.reply_text(
                     "Фото лицевой стороны получила. 📸✨\n\n"
