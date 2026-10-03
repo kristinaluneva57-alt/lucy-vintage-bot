@@ -288,8 +288,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧭 ОПРЕДЕЛИТЕЛЬ\n\n"
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
             "но у меня работа такая. 😏"
-        )
-     elif text == "🗃 Моя шкатулка":
+         )
+    elif text == "🗃 Моя шкатулка":
         items = get_items()
 
         if not items:
