@@ -1,4 +1,5 @@
 import os
+import sqlite3
 
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -10,6 +11,7 @@ from telegram.ext import (
 )
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+DB_PATH = "/data/lucy_vintage.db"
 
 MAIN_MENU = [
     ["🔎 Определить украшение", "📚 Найти информацию"],
@@ -17,7 +19,53 @@ MAIN_MENU = [
     ["🧭 Разделы школы", "💬 Vintage Club"],
 ]
 
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_code TEXT UNIQUE,
+            measurements TEXT,
+            weight TEXT,
+            provenance TEXT,
+            seller_story TEXT,
+            attribution_status TEXT DEFAULT 'не определено'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    
+def save_item(measurements, weight, provenance, seller_story):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
+    cursor.execute(
+        """
+        INSERT INTO items (
+            measurements,
+            weight,
+            provenance,
+            seller_story
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (measurements, weight, provenance, seller_story)
+    )
+
+    item_id = cursor.lastrowid
+    item_code = f"OMG-{item_id:06d}"
+
+    cursor.execute(
+        "UPDATE items SET item_code = ? WHERE id = ?",
+        (item_code, item_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return item_code
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
@@ -140,7 +188,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and context.user_data.get("step") == "seller_story"
     ):
         context.user_data["seller_story"] = text
-        context.user_data["item_id"] = "OMG-000001"
+        context.user_data["item_id"] = save_item(
+            context.user_data.get("measurements", "не указаны"),
+            context.user_data.get("weight", "не указан"),
+            context.user_data.get("provenance", "не указано"),
+            text
+        )
         context.user_data["step"] = "complete"
 
         await update.message.reply_text(
@@ -261,6 +314,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пока я учусь искать по базе школы. 😈"
         )
 def main():
+    init_db()
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
