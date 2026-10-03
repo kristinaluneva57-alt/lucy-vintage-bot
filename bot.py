@@ -317,16 +317,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        message = "🗃 МОЯ ШКАТУЛКА\n\n"
+        keyboard = []
 
         for item_code, measurements, weight in items:
-            message += (
-                f"💎 {item_code}\n"
-                f"📏 {measurements}\n"
-                f"⚖️ {weight}\n\n"
-            )
+            keyboard.append([
+            InlineKeyboardButton(
+            f"💎 {item_code}",
+            callback_data=f"item:{item_code}"
+        )
+            ])
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(
+    "🗃 МОЯ ШКАТУЛКА\n\n"
+    "Выбери находку, чтобы открыть её карточку:",
+    reply_markup=InlineKeyboardMarkup(keyboard)
+)
         return
     elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
