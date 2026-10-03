@@ -66,7 +66,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  reply_markup=mark_keyboard
             )
             return
-                if (
+                    if step == "mark_photo":
+            context.user_data["step"] = "details_photo"
+            await update.message.reply_text(
+                "Фото маркировки получила. 🔎✨\n\n"
+                "Сохраняем её как отдельную зацепку — само клеймо "
+                "ещё не считаем доказательством производителя.\n\n"
+                "Теперь пришли крупное фото застёжки, шарнира, креплений "
+                "или другой характерной детали."
+            )
+            return
+        if (
         context.user_data.get("mode") == "identify"
         and context.user_data.get("step") == "mark_photo"
         and text == "🚫 Клейма нет"
