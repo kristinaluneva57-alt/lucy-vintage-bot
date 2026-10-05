@@ -149,8 +149,9 @@ def save_book(title, author, publication_year, publisher):
         existing_knowledge = cursor.fetchone()
 
         if existing_knowledge:
-        conn.close()
-        return existing_knowledge[0]
+            conn.close()
+            return existing_knowledge[0]
+            
         cursor.execute(
         """
         INSERT INTO knowledge (
