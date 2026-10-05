@@ -123,19 +123,19 @@ def save_book(title, author, publication_year, publisher):
 
     return book_code
     def save_knowledge(topic, fact, book_code, page_number, status="extracted", notes=None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-    cursor.execute(
+        cursor.execute(
         "SELECT id FROM books WHERE book_code = ?",
         (book_code,)
-    )
-    book = cursor.fetchone()
+        )
+        book = cursor.fetchone()
 
-    if not book:
+        if not book:
         conn.close()
         return None
-    cursor.execute(
+        cursor.execute(
         """
         SELECT k.id
         FROM knowledge k
@@ -143,14 +143,14 @@ def save_book(title, author, publication_year, publisher):
         WHERE k.fact = ? AND ks.book_id = ? AND ks.page_number = ?
         """,
         (fact, book[0], page_number)
-    )
+        )
 
-    existing_knowledge = cursor.fetchone()
+        existing_knowledge = cursor.fetchone()
 
-    if existing_knowledge:
+        if existing_knowledge:
         conn.close()
         return existing_knowledge[0]
-    cursor.execute(
+        cursor.execute(
         """
         INSERT INTO knowledge (
             topic,
@@ -161,11 +161,11 @@ def save_book(title, author, publication_year, publisher):
         VALUES (?, ?, ?, ?)
         """,
         (topic, fact, status, notes)
-    )
+        )
 
-    knowledge_id = cursor.lastrowid
+        knowledge_id = cursor.lastrowid
 
-    cursor.execute(
+        cursor.execute(
         """
         INSERT INTO knowledge_sources (
             knowledge_id,
@@ -175,12 +175,12 @@ def save_book(title, author, publication_year, publisher):
         VALUES (?, ?, ?)
         """,
         (knowledge_id, book[0], page_number)
-    )
+        )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
 
-    return knowledge_id
+        return knowledge_id
 def seed_books():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
