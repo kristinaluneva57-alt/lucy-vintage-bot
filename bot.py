@@ -127,7 +127,7 @@ def get_item(item_code):
     cursor.execute(
         """
         SELECT item_code, measurements, weight, provenance,
-               seller_story, attribution_status, front_photo
+               seller_story, attribution_status, front_photo, back_photo
         FROM items
         WHERE item_code = ?
         """,
@@ -159,10 +159,16 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seller_story,
         attribution_status,
         front_photo
+                attribution_status,
+        front_photo,
+        back_photo
     ) = item
     
     if front_photo:
         await query.message.reply_photo(photo=front_photo)
+        
+    if back_photo:
+        await query.message.reply_photo(photo=back_photo)
 
     card = (
         "✦ OH MY GOD VINTAGE ARCHIVE ✦\n\n"
