@@ -650,6 +650,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     seed_books()
+    seed_knowledge()
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
