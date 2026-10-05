@@ -135,7 +135,21 @@ def save_book(title, author, publication_year, publisher):
     if not book:
         conn.close()
         return None
+    cursor.execute(
+        """
+        SELECT k.id
+        FROM knowledge k
+        JOIN knowledge_sources ks ON ks.knowledge_id = k.id
+        WHERE k.fact = ? AND ks.book_id = ? AND ks.page_number = ?
+        """,
+        (fact, book[0], page_number)
+    )
 
+    existing_knowledge = cursor.fetchone()
+
+    if existing_knowledge:
+        conn.close()
+        return existing_knowledge[0]
     cursor.execute(
         """
         INSERT INTO knowledge (
@@ -187,7 +201,14 @@ def seed_books():
             "Shire Publications Ltd"
         )
 def seed_knowledge():
-    pass
+        save_knowledge(
+        "Материалы / Jet",
+        "Jet is a type of brown coal, a fossilised wood of an ancient tree similar to the present-day Araucaria or monkey puzzle tree.",
+        "BOOK-000001",
+        3,
+        status="extracted",
+        notes="Introduction. Требует проверки перед переводом в verified."
+    )
 def save_item(
     measurements,
     weight,
