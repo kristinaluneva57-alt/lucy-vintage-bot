@@ -195,13 +195,13 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=details_keyboard
     )
 async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-   query = update.callback_query
-   await query.answer()
+    query = update.callback_query
+    await query.answer()
 
     item_code = query.data.split(":", 1)[1]
     item = get_item(item_code)
 
-   if not item:
+    if not item:
         await query.message.reply_text("Не смогла найти эту карточку. 🔎")
         return
 
