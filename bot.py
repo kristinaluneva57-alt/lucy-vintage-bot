@@ -647,6 +647,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔎 Ищу информацию по запросу: {query}\n\n"
             "Пока я учусь искать по базе школы. 😈"
         )
+  async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT b.book_code, b.title, k.fact, ks.page_number
+        FROM knowledge k
+        JOIN knowledge_sources ks ON ks.knowledge_id = k.id
+        JOIN books b ON b.id = ks.book_id
+        ORDER BY k.id
+        LIMIT 1
+        """
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        book_code, title, fact, page = row
+        await update.message.reply_text(
+            f"📚 {book_code}\n"
+            f"{title}\n"
+            f"Страница: {page}\n\n"
+            f"🧠 {fact}"
+        )
+    else:
+        await update.message.reply_text("❌ В базе знаний пока пусто.")
 def main():
     init_db()
     seed_books()
@@ -654,6 +682,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
