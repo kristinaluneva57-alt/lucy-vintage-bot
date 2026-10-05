@@ -158,8 +158,6 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         provenance,
         seller_story,
         attribution_status,
-        front_photo
-                attribution_status,
         front_photo,
         back_photo
     ) = item
