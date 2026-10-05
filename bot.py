@@ -649,7 +649,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔎 Ищу информацию по запросу: {query}\n\n"
             "Пока я учусь искать по базе школы. 😈"
         )
-  async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
