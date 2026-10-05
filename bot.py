@@ -179,12 +179,19 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "─── АТРИБУЦИЯ ───\n"
         f"◇ Статус: {attribution_status}\n\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
-        f"{seller_story}\n\n"
-        "─── ДОКАЗАТЕЛЬСТВА И ЗАЦЕПКИ ───\n"
-        "Пока не добавлены."
+        f"{seller_story}"
     )
-
-    await query.message.reply_text(card)
+    details_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔬 Клеймо и детали",
+            callback_data=f"details:{item_code}"
+        )]
+    ])
+    
+        await query.message.reply_text(
+        card,
+        reply_markup=details_keyboard
+    )
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
