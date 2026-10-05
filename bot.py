@@ -127,7 +127,7 @@ def get_item(item_code):
     cursor.execute(
         """
         SELECT item_code, measurements, weight, provenance,
-               seller_story, attribution_status, front_photo, back_photo
+               seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo
         FROM items
         WHERE item_code = ?
         """,
@@ -159,7 +159,9 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seller_story,
         attribution_status,
         front_photo,
-        back_photo
+        back_photo,
+        mark_photo,
+        details_photo
     ) = item
     
     if front_photo:
@@ -192,6 +194,25 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         card,
         reply_markup=details_keyboard
     )
+async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   query = update.callback_query
+    await query.answer()
+
+    item_code = query.data.split(":", 1)[1]
+    item = get_item(item_code)
+
+   if not item:
+        await query.message.reply_text("Не смогла найти эту карточку. 🔎")
+        return
+
+    mark_photo = item[8]
+    details_photo = item[9]
+
+    if mark_photo:
+        await query.message.reply_photo(photo=mark_photo)
+
+    if details_photo:
+        await query.message.reply_photo(photo=details_photo)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
@@ -479,6 +500,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
+    app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )    
