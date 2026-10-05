@@ -122,7 +122,7 @@ def save_book(title, author, publication_year, publisher):
     conn.close()
 
     return book_code
-    def save_knowledge(topic, fact, book_code, page_number, status="extracted", notes=None):
+def save_knowledge(topic, fact, book_code, page_number, status="extracted", notes=None):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
