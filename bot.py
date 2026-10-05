@@ -188,7 +188,7 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
     ])
     
-        await query.message.reply_text(
+    await query.message.reply_text(
         card,
         reply_markup=details_keyboard
     )
