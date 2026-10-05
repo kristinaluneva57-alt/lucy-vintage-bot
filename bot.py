@@ -186,6 +186,8 @@ def seed_books():
             1980,
             "Shire Publications Ltd"
         )
+def seed_knowledge():
+    pass
 def save_item(
     measurements,
     weight,
