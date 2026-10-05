@@ -122,6 +122,51 @@ def save_book(title, author, publication_year, publisher):
     conn.close()
 
     return book_code
+    def save_knowledge(topic, fact, book_code, page_number, status="extracted", notes=None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM books WHERE book_code = ?",
+        (book_code,)
+    )
+    book = cursor.fetchone()
+
+    if not book:
+        conn.close()
+        return None
+
+    cursor.execute(
+        """
+        INSERT INTO knowledge (
+            topic,
+            fact,
+            status,
+            notes
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (topic, fact, status, notes)
+    )
+
+    knowledge_id = cursor.lastrowid
+
+    cursor.execute(
+        """
+        INSERT INTO knowledge_sources (
+            knowledge_id,
+            book_id,
+            page_number
+        )
+        VALUES (?, ?, ?)
+        """,
+        (knowledge_id, book[0], page_number)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return knowledge_id
 def seed_books():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
