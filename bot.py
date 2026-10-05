@@ -53,6 +53,44 @@ def init_db():
             conn.execute(
                 f"ALTER TABLE items ADD COLUMN {column_name} {column_type}"
             )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_code TEXT UNIQUE,
+            title TEXT NOT NULL,
+            author TEXT,
+            publication_year INTEGER,
+            publisher TEXT,
+            source_type TEXT DEFAULT 'book',
+            review_status TEXT DEFAULT 'needs_review'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL,
+            fact TEXT NOT NULL,
+            status TEXT DEFAULT 'extracted',
+            notes TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            knowledge_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            page_number INTEGER,
+            source_note TEXT,
+            FOREIGN KEY (knowledge_id) REFERENCES knowledge(id),
+            FOREIGN KEY (book_id) REFERENCES books(id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
     
