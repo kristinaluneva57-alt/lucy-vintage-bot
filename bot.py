@@ -122,6 +122,25 @@ def save_book(title, author, publication_year, publisher):
     conn.close()
 
     return book_code
+def seed_books():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM books WHERE title = ? AND author = ?",
+        ("Jet Jewellery and Ornaments", "Helen Muller")
+    )
+
+    existing_book = cursor.fetchone()
+    conn.close()
+
+    if not existing_book:
+        save_book(
+            "Jet Jewellery and Ornaments",
+            "Helen Muller",
+            1980,
+            "Shire Publications Ltd"
+        )
 def save_item(
     measurements,
     weight,
@@ -562,6 +581,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 def main():
     init_db()
+    seed_books()
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
