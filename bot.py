@@ -93,7 +93,35 @@ def init_db():
     )
     conn.commit()
     conn.close()
-    
+def save_book(title, author, publication_year, publisher):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO books (
+            title,
+            author,
+            publication_year,
+            publisher
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (title, author, publication_year, publisher)
+    )
+
+    book_id = cursor.lastrowid
+    book_code = f"BOOK-{book_id:06d}"
+
+    cursor.execute(
+        "UPDATE books SET book_code = ? WHERE id = ?",
+        (book_code, book_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return book_code
 def save_item(
     measurements,
     weight,
