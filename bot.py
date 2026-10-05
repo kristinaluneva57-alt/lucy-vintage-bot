@@ -133,8 +133,9 @@ def save_book(title, author, publication_year, publisher):
         book = cursor.fetchone()
 
         if not book:
-        conn.close()
-        return None
+            conn.close()
+            return None
+            
         cursor.execute(
         """
         SELECT k.id
