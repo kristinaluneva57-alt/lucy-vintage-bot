@@ -2,6 +2,7 @@ import os
 import sqlite3
 
 from library_db import init_library_db
+from library_importer import register_document, save_page, update_import_progress, get_import_progress
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -679,6 +680,49 @@ async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("❌ В базе знаний пока пусто.")
+async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    test_checksum = "OMG-IMPORTER-TEST-V1"
+
+    document_id, document_code, created_first = register_document(
+        title="TEST IMPORTER DOCUMENT",
+        storage_key="test://library-importer",
+        language="en",
+        checksum=test_checksum,
+    )
+
+    _, second_code, created_second = register_document(
+        title="TEST IMPORTER DOCUMENT",
+        storage_key="test://library-importer",
+        language="en",
+        checksum=test_checksum,
+    )
+
+    save_page(
+        document_id=document_id,
+        pdf_page=1,
+        printed_page="1",
+        original_text="Original test text",
+        russian_text="Тестовый перевод",
+    )
+
+    update_import_progress(
+        document_id=document_id,
+        last_completed_page=7,
+        status="processing",
+    )
+
+    status, last_page, error = get_import_progress(document_id)
+
+    await update.message.reply_text(
+        "🧪 ТЕСТ ИМПОРТЕРА\n\n"
+        f"Документ: {document_code}\n"
+        f"Первое создание: {created_first}\n"
+        f"Повторное создание: {created_second}\n"
+        f"Код при повторе: {second_code}\n"
+        f"Статус: {status}\n"
+        f"Последняя страница: {last_page}\n"
+        f"Ошибка: {error}"
+    )
 def main():
     init_db()
     init_library_db()
@@ -688,6 +732,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
+    app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
