@@ -1,5 +1,6 @@
 import hashlib
 import os
+import fitz
 
 from library_db import get_connection
 
@@ -178,3 +179,28 @@ def get_import_progress(document_id):
             return "pending", 0, None
 
         return row[0], row[1], row[2]
+        
+def inspect_pdf(file_path):
+    document = fitz.open(file_path)
+
+    pages = []
+
+    for page_number in range(document.page_count):
+        page = document.load_page(page_number)
+        text = page.get_text("text").strip()
+
+        pages.append({
+            "pdf_page": page_number + 1,
+            "has_text": bool(text),
+            "text_length": len(text),
+        })
+
+    result = {
+        "page_count": document.page_count,
+        "pages_with_text": sum(1 for page in pages if page["has_text"]),
+        "pages_without_text": sum(1 for page in pages if not page["has_text"]),
+        "pages": pages,
+    }
+
+    document.close()
+    return result
