@@ -1,6 +1,7 @@
 import hashlib
 import os
 import fitz
+import urllib.request
 
 from library_db import get_connection
 
@@ -204,3 +205,7 @@ def inspect_pdf(file_path):
 
     document.close()
     return result
+    
+def download_pdf(url, destination_path):
+    urllib.request.urlretrieve(url, destination_path)
+    return destination_path
