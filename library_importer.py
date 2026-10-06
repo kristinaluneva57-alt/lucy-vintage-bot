@@ -2,6 +2,7 @@ import hashlib
 import os
 import fitz
 import urllib.request
+import boto3
 
 from library_db import get_connection
 
