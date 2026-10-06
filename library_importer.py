@@ -228,3 +228,24 @@ def download_pdf_from_r2(storage_key, destination_path):
     )
 
     return destination_path
+def ocr_pdf_page(file_path, pdf_page):
+    document = fitz.open(file_path)
+
+    try:
+        page = document.load_page(pdf_page - 1)
+
+        text_page = page.get_textpage_ocr(
+            language="eng",
+            dpi=300,
+            full=True,
+        )
+
+        text = page.get_text(
+            "text",
+            textpage=text_page,
+        )
+
+        return text.strip()
+
+    finally:
+        document.close()
