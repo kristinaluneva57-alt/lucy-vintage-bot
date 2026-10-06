@@ -249,3 +249,111 @@ def ocr_pdf_page(file_path, pdf_page):
 
     finally:
         document.close()
+def import_pdf_with_ocr(
+    storage_key,
+    title,
+    language="eng",
+):
+    local_path = "/tmp/library_import.pdf"
+
+    download_pdf_from_r2(storage_key, local_path)
+
+    checksum = calculate_checksum(local_path)
+
+    document_id, document_code, created = register_document(
+        title=title,
+        storage_key=storage_key,
+        language=language,
+        checksum=checksum,
+    )
+
+    status, last_completed_page, error_message = get_import_progress(
+        document_id
+    )
+
+    pdf_info = inspect_pdf(local_path)
+    total_pages = pdf_info["page_count"]
+
+    start_page = last_completed_page + 1
+
+    if start_page > total_pages:
+        update_import_progress(
+            document_id,
+            total_pages,
+            status="completed",
+            error_message=None,
+        )
+
+        return {
+            "document_id": document_id,
+            "document_code": document_code,
+            "total_pages": total_pages,
+            "completed_pages": total_pages,
+            "status": "completed",
+        }
+
+    try:
+        for pdf_page in range(start_page, total_pages + 1):
+            text = ocr_pdf_page(
+                local_path,
+                pdf_page,
+            )
+
+            page_status = (
+                "extracted"
+                if text
+                else "empty"
+            )
+
+            save_page(
+                document_id=document_id,
+                pdf_page=pdf_page,
+                original_text=text,
+                extraction_status=page_status,
+            )
+
+            update_import_progress(
+                document_id,
+                pdf_page,
+                status="processing",
+                error_message=None,
+            )
+
+        update_import_progress(
+            document_id,
+            total_pages,
+            status="completed",
+            error_message=None,
+        )
+
+        return {
+            "document_id": document_id,
+            "document_code": document_code,
+            "total_pages": total_pages,
+            "completed_pages": total_pages,
+            "status": "completed",
+        }
+
+    except Exception as error:
+        completed_page = max(
+            start_page - 1,
+            0,
+        )
+
+        status, saved_page, _ = get_import_progress(
+            document_id
+        )
+
+        completed_page = max(
+            completed_page,
+            saved_page,
+        )
+
+        update_import_progress(
+            document_id,
+            completed_page,
+            status="error",
+            error_message=f"{type(error).__name__}: {error}",
+        )
+
+        raise
