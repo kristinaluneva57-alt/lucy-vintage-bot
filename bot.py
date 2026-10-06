@@ -2,7 +2,7 @@ import os
 import sqlite3
 
 from library_db import init_library_db
-from library_importer import register_document, save_page, update_import_progress, get_import_progress
+from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -723,6 +723,26 @@ async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Последняя страница: {last_page}\n"
         f"Ошибка: {error}"
     )
+    
+async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    storage_key = "books/BOOK-000001/Book 1.pdf"
+    local_path = "/tmp/book_000001.pdf"
+
+    try:
+        download_pdf_from_r2(storage_key, local_path)
+        result = inspect_pdf(local_path)
+
+        await update.message.reply_text(
+            "☁️ R2 ТЕСТ УСПЕШЕН\n\n"
+            f"Файл: {storage_key}\n"
+            f"PDF-страниц: {result['page_count']}\n"
+            f"Страниц с текстом: {result['pages_with_text']}\n"
+            f"Страниц без текста: {result['pages_without_text']}"
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ R2 ТЕСТ НЕ ПРОШЁЛ\n\n{type(error).__name__}: {error}"
+        )
 def main():
     init_db()
     init_library_db()
@@ -733,6 +753,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CommandHandler("testimporter", test_importer))
+    app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
