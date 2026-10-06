@@ -1,6 +1,8 @@
 import os
 import sqlite3
 
+from library_db import init_library_db
+
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -679,6 +681,7 @@ async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ В базе знаний пока пусто.")
 def main():
     init_db()
+    init_library_db()
     seed_books()
     seed_knowledge()
     app = Application.builder().token(TOKEN).build()
