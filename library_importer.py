@@ -156,7 +156,7 @@ def update_import_progress(
         )
         
         
-        def get_import_progress(document_id):
+def get_import_progress(document_id):
     with get_connection() as conn:
         cursor = conn.cursor()
 
