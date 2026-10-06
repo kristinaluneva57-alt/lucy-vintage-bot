@@ -2,7 +2,7 @@ import os
 import sqlite3
 
 from library_db import init_library_db
-from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf
+from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -739,6 +739,33 @@ async def test_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔧 ENV TEST\n\n" + result
     )
+async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 Начинаю импорт Jet.\n"
+        "OCR обрабатывает всю книгу. Это может занять некоторое время."
+    )
+
+    try:
+        result = import_pdf_with_ocr(
+            storage_key="books/BOOK-000001/Book 1.pdf",
+            title="Jet Jewellery and Ornaments",
+            language="eng",
+        )
+
+        await update.message.reply_text(
+            "✅ JET ИМПОРТИРОВАН\n\n"
+            f"Документ: {result['document_code']}\n"
+            f"PDF-страниц: {result['total_pages']}\n"
+            f"Обработано: {result['completed_pages']}\n"
+            f"Статус: {result['status']}"
+        )
+
+    except Exception as error:
+        await update.message.reply_text(
+            "❌ ИМПОРТ JET ОСТАНОВЛЕН\n\n"
+            f"{type(error).__name__}: {error}\n\n"
+            "Уже сохранённые страницы не потеряны."
+        )
 async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage_key = "books/BOOK-000001/Book 1.pdf"
     local_path = "/tmp/book_000001.pdf"
@@ -769,6 +796,7 @@ def main():
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
+    app.add_handler(CommandHandler("importjet", import_jet))
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
