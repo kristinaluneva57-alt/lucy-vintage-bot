@@ -723,7 +723,22 @@ async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Последняя страница: {last_page}\n"
         f"Ошибка: {error}"
     )
-    
+async def test_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    names = [
+        "R2_ENDPOINT_URL",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_NAME",
+    ]
+
+    result = "\n".join(
+        f"{name}: {'YES' if name in os.environ else 'NO'}"
+        for name in names
+    )
+
+    await update.message.reply_text(
+        "🔧 ENV TEST\n\n" + result
+    )
 async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage_key = "books/BOOK-000001/Book 1.pdf"
     local_path = "/tmp/book_000001.pdf"
@@ -754,6 +769,7 @@ def main():
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
+    app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
