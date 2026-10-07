@@ -293,11 +293,20 @@ def import_pdf_with_ocr(
         }
 
     try:
-        for pdf_page in range(start_page, total_pages + 1):
-            text = ocr_pdf_page(
-                local_path,
-                pdf_page,
-            )
+                for pdf_page in range(start_page, total_pages + 1):
+            document = fitz.open(local_path)
+
+            try:
+                page = document.load_page(pdf_page - 1)
+                text = page.get_text("text").strip()
+            finally:
+                document.close()
+
+            if not text:
+                text = ocr_pdf_page(
+                    local_path,
+                    pdf_page,
+                )
 
             page_status = (
                 "extracted"
