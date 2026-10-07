@@ -645,7 +645,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я запомнила, что именно мы ищем. "
             "Я посмотрю, что можно найти по этому запросу. 😈"
         )
-        elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
+    elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
         query = text.strip()
         context.user_data["mode"] = None
 
