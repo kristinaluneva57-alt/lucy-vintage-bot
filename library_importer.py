@@ -293,7 +293,7 @@ def import_pdf_with_ocr(
         }
 
     try:
-                for pdf_page in range(start_page, total_pages + 1):
+        for pdf_page in range(start_page, total_pages + 1):
             document = fitz.open(local_path)
 
             try:
