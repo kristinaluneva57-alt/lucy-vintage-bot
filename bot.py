@@ -654,10 +654,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cursor.execute(
             """
-            SELECT d.title, p.pdf_page, p.printed_page, p.original_text
+            SELECT d.title, p.pdf_page, p.printed_page,
+                    COALESCE(p.cleaned_text, p.original_text)
             FROM library_pages p
             JOIN library_documents d ON d.id = p.document_id
-            WHERE p.original_text LIKE ?
+            WHERE COALESCE(p.cleaned_text, p.original_text) LIKE ?
             ORDER BY d.id, p.pdf_page
             LIMIT 5
             """,
