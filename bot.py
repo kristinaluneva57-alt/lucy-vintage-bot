@@ -675,7 +675,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for title, pdf_page, printed_page, original_text in results:
             page_label = printed_page or f"PDF {pdf_page}"
-            excerpt = original_text[:1200]
+            position = original_text.lower().find(query.lower())
+            start = max(0, position - 400)
+            end = min(len(original_text), position + len(query) + 800)
+            excerpt = original_text[start:end]
 
             await update.message.reply_text(
                 f"📚 {title}\n"
