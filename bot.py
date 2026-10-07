@@ -645,13 +645,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я запомнила, что именно мы ищем. "
             "Я посмотрю, что можно найти по этому запросу. 😈"
         )
-    elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
-        query = text
+        elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
+        query = text.strip()
         context.user_data["mode"] = None
-        await update.message.reply_text(
-            f"🔎 Ищу информацию по запросу: {query}\n\n"
-            "Пока я учусь искать по базе школы. 😈"
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT d.title, p.pdf_page, p.printed_page, p.original_text
+            FROM library_pages p
+            JOIN library_documents d ON d.id = p.document_id
+            WHERE p.original_text LIKE ?
+            ORDER BY d.id, p.pdf_page
+            LIMIT 5
+            """,
+            (f"%{query}%",)
         )
+
+        results = cursor.fetchall()
+        conn.close()
+
+        if not results:
+            await update.message.reply_text(
+                f"🔎 По запросу «{query}» пока ничего не нашла в библиотеке."
+            )
+            return
+
+        for title, pdf_page, printed_page, original_text in results:
+            page_label = printed_page or f"PDF {pdf_page}"
+            excerpt = original_text[:1200]
+
+            await update.message.reply_text(
+                f"📚 {title}\n"
+                f"📄 Страница: {page_label}\n\n"
+                f"{excerpt}"
+            )
+
+        return
 async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
