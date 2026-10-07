@@ -781,6 +781,25 @@ async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            UPDATE library_import_jobs
+            SET status = 'pending',
+                last_completed_page = 0,
+                error_message = NULL
+            WHERE document_id = (
+                SELECT id
+                FROM library_documents
+                WHERE document_code = 'DOC-000002'
+            )
+            """
+        )
+
+        conn.commit()
+        conn.close()
         result = import_pdf_with_ocr(
             storage_key="books/BOOK-000001/Book 1.pdf",
             title="Jet Jewellery and Ornaments",
