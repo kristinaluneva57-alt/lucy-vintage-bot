@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import fitz
 import urllib.request
 import boto3
@@ -97,6 +98,7 @@ def save_page(
     document_id,
     pdf_page,
     original_text=None,
+    cleaned_text=None,
     printed_page=None,
     russian_text=None,
     extraction_status="extracted",
@@ -165,14 +167,33 @@ def get_import_progress(document_id):
 
         cursor.execute(
             """
-            SELECT
-                status,
-                last_completed_page,
-                error_message
-            FROM library_import_jobs
-            WHERE document_id = ?
+            INSERT INTO library_pages (
+                document_id,
+                pdf_page,
+                printed_page,
+                original_text,
+                cleaned_text,
+                russian_text,
+                extraction_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_id, pdf_page)
+            DO UPDATE SET
+                printed_page = excluded.printed_page,
+                original_text = excluded.original_text,
+                cleaned_text = excluded.cleaned_text,
+                russian_text = excluded.russian_text,
+                extraction_status = excluded.extraction_status
             """,
-            (document_id,),
+            (
+                document_id,
+                pdf_page,
+                printed_page,
+                original_text,
+                cleaned_text,
+                russian_text,
+                extraction_status,
+            ),
         )
 
         row = cursor.fetchone()
@@ -228,6 +249,43 @@ def download_pdf_from_r2(storage_key, destination_path):
     )
 
     return destination_path
+def clean_ocr_text(text):
+    if not text:
+        return ""
+
+    cleaned = text
+
+    # Склеиваем слова, разорванные переносом:
+    # "manu-\nfacture" -> "manufacture"
+    cleaned = re.sub(
+        r"([A-Za-z])-\s*\n\s*([a-z])",
+        r"\1\2",
+        cleaned,
+    )
+
+    # Обычные переносы строк внутри абзаца превращаем в пробелы.
+    # Пустая строка остаётся границей абзаца.
+    cleaned = re.sub(
+        r"(?<!\n)\n(?!\n)",
+        " ",
+        cleaned,
+    )
+
+    # Убираем лишние пробелы и табы.
+    cleaned = re.sub(
+        r"[ \t]+",
+        " ",
+        cleaned,
+    )
+
+    # Приводим большие разрывы между абзацами к двум переносам.
+    cleaned = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        cleaned,
+    )
+
+    return cleaned.strip()
 def ocr_pdf_page(file_path, pdf_page):
     document = fitz.open(file_path)
 
@@ -344,7 +402,7 @@ def import_pdf_with_ocr(
                     local_path,
                     pdf_page,
                 )
-
+            cleaned_text = clean_ocr_text(text)
             page_status = (
                 "extracted"
                 if text
@@ -355,6 +413,7 @@ def import_pdf_with_ocr(
                 document_id=document_id,
                 pdf_page=pdf_page,
                 original_text=text,
+                cleaned_text=cleaned_text,
                 extraction_status=page_status,
             )
 
