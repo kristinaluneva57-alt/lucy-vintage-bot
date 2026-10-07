@@ -234,59 +234,58 @@ def ocr_pdf_page(file_path, pdf_page):
     try:
         page = document.load_page(pdf_page - 1)
 
-        text_page = page.get_textpage_ocr(
-            language="eng",
-            dpi=300,
-            full=True,
+        width = page.rect.width
+        height = page.rect.height
+        middle = width / 2
+
+        left_rect = fitz.Rect(
+            0,
+            0,
+            middle,
+            height,
         )
 
-        blocks = page.get_text(
-            "blocks",
-            textpage=text_page,
+        right_rect = fitz.Rect(
+            middle,
+            0,
+            width,
+            height,
         )
 
-        page_width = page.rect.width
-        middle = page_width / 2
+        texts = []
 
-        left_blocks = []
-        right_blocks = []
-        wide_blocks = []
+        for clip in (left_rect, right_rect):
+            pix = page.get_pixmap(
+                matrix=fitz.Matrix(300 / 72, 300 / 72),
+                clip=clip,
+                alpha=False,
+            )
 
-        for block in blocks:
-            x0, y0, x1, y1, text = block[:5]
+            ocr_pdf = fitz.open(
+                "pdf",
+                pix.pdfocr_tobytes(
+                    language="eng",
+                ),
+            )
 
-            if not text.strip():
-                continue
+            try:
+                text = ocr_pdf[0].get_text(
+                    "text",
+                    sort=True,
+                ).strip()
 
-            block_width = x1 - x0
+                if text:
+                    texts.append(text)
 
-            if block_width > page_width * 0.65:
-                wide_blocks.append(block)
-            elif (x0 + x1) / 2 < middle:
-                left_blocks.append(block)
-            else:
-                right_blocks.append(block)
+            finally:
+                ocr_pdf.close()
 
-        left_blocks.sort(key=lambda block: block[1])
-        right_blocks.sort(key=lambda block: block[1])
-        wide_blocks.sort(key=lambda block: block[1])
-
-        ordered_blocks = (
-            wide_blocks +
-            left_blocks +
-            right_blocks
-        )
-
-        text = "\n".join(
-            block[4].strip()
-            for block in ordered_blocks
-            if block[4].strip()
-        )
-
-        return text.strip()
+        return "\n\n".join(texts).strip()
 
     finally:
         document.close()
+
+        
 def import_pdf_with_ocr(
     storage_key,
     title,
