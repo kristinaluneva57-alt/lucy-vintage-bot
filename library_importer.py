@@ -240,9 +240,47 @@ def ocr_pdf_page(file_path, pdf_page):
             full=True,
         )
 
-        text = page.get_text(
-            "text",
+        blocks = page.get_text(
+            "blocks",
             textpage=text_page,
+        )
+
+        page_width = page.rect.width
+        middle = page_width / 2
+
+        left_blocks = []
+        right_blocks = []
+        wide_blocks = []
+
+        for block in blocks:
+            x0, y0, x1, y1, text = block[:5]
+
+            if not text.strip():
+                continue
+
+            block_width = x1 - x0
+
+            if block_width > page_width * 0.65:
+                wide_blocks.append(block)
+            elif (x0 + x1) / 2 < middle:
+                left_blocks.append(block)
+            else:
+                right_blocks.append(block)
+
+        left_blocks.sort(key=lambda block: block[1])
+        right_blocks.sort(key=lambda block: block[1])
+        wide_blocks.sort(key=lambda block: block[1])
+
+        ordered_blocks = (
+            wide_blocks +
+            left_blocks +
+            right_blocks
+        )
+
+        text = "\n".join(
+            block[4].strip()
+            for block in ordered_blocks
+            if block[4].strip()
         )
 
         return text.strip()
