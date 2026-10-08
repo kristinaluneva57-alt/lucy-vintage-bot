@@ -9,7 +9,7 @@ from knowledge_bridge import (
     get_library_fact,
 )
 from fact_extractor import extract_page_facts
-from ai_fact_extractor import extract_ai_facts
+from ai_fact_extractor import extract_ai_facts, save_ai_facts
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -932,6 +932,13 @@ async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def ai_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = os.environ.get("LUCY_ADMIN_ID")
+
+    if not admin_id or str(update.effective_user.id) != admin_id:
+        await update.message.reply_text(
+            "🔒 Команда доступна только администратору."
+        )
+        return
     await update.message.reply_text(
         "🧠 Люся анализирует страницу 12 книги Jet..."
     )
@@ -968,6 +975,46 @@ async def ai_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def save_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = os.environ.get("LUCY_ADMIN_ID")
+
+    if not admin_id or str(update.effective_user.id) != admin_id:
+        await update.message.reply_text(
+            "🔒 Команда доступна только администратору."
+        )
+        return
+
+    await update.message.reply_text(
+        "📚 Люся извлекает и сохраняет факты из Jet..."
+    )
+
+    try:
+        facts = await asyncio.to_thread(
+            extract_ai_facts, "DOC-000002", 12
+        )
+
+        if not facts:
+            await update.message.reply_text(
+                "На странице нет подтверждённых фактов."
+            )
+            return
+
+        ids = await asyncio.to_thread(
+            save_ai_facts, "DOC-000002", 12, facts
+        )
+
+        await update.message.reply_text(
+            f"✅ Сохранено или найдено в базе: {len(ids)} фактов.\n"
+            f"ID записей: {ids}\n"
+            "Источник: DOC-000002, PDF-страница 12."
+        )
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ Ошибка сохранения: {type(error).__name__}: {error}"
+        )
+
+
 def main():
     init_db()
     init_library_db()
@@ -981,6 +1028,7 @@ def main():
     app.add_handler(CommandHandler("testbridge", test_bridge))
     app.add_handler(CommandHandler("extractjet", extract_jet))
     app.add_handler(CommandHandler("aijet", ai_jet))
+    app.add_handler(CommandHandler("savejet", save_jet))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
