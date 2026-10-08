@@ -94,6 +94,7 @@ def register_document(
         return document_id, document_code, True
         
         
+        
 def save_page(
     document_id,
     pdf_page,
@@ -103,65 +104,6 @@ def save_page(
     russian_text=None,
     extraction_status="extracted",
 ):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO library_pages (
-                document_id,
-                pdf_page,
-                printed_page,
-                original_text,
-                russian_text,
-                extraction_status
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(document_id, pdf_page)
-            DO UPDATE SET
-                printed_page = excluded.printed_page,
-                original_text = excluded.original_text,
-                russian_text = excluded.russian_text,
-                extraction_status = excluded.extraction_status
-            """,
-            (
-                document_id,
-                pdf_page,
-                printed_page,
-                original_text,
-                russian_text,
-                extraction_status,
-            ),
-        )
-
-
-def update_import_progress(
-    document_id,
-    last_completed_page,
-    status="processing",
-    error_message=None,
-):
-    with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE library_import_jobs
-            SET
-                status = ?,
-                last_completed_page = ?,
-                error_message = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE document_id = ?
-            """,
-            (
-                status,
-                last_completed_page,
-                error_message,
-                document_id,
-            ),
-        )
-        
-        
-def get_import_progress(document_id):
     with get_connection() as conn:
         cursor = conn.cursor()
 
@@ -196,12 +138,57 @@ def get_import_progress(document_id):
             ),
         )
 
+
+
+def update_import_progress(
+    document_id,
+    last_completed_page,
+    status="processing",
+    error_message=None,
+):
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE library_import_jobs
+            SET
+                status = ?,
+                last_completed_page = ?,
+                error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE document_id = ?
+            """,
+            (
+                status,
+                last_completed_page,
+                error_message,
+                document_id,
+            ),
+        )
+        
+        
+def get_import_progress(document_id):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                status,
+                last_completed_page,
+                error_message
+            FROM library_import_jobs
+            WHERE document_id = ?
+            """,
+            (document_id,),
+        )
+
         row = cursor.fetchone()
 
         if not row:
             return "pending", 0, None
 
         return row[0], row[1], row[2]
+
         
 def inspect_pdf(file_path):
     document = fitz.open(file_path)
