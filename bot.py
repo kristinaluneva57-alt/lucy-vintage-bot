@@ -94,6 +94,21 @@ def init_db():
         )
         """
     )
+    
+    columns = [
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(knowledge_sources)"
+        ).fetchall()
+    ]
+
+    if "library_page_id" not in columns:
+        conn.execute(
+            "ALTER TABLE knowledge_sources "
+            "ADD COLUMN library_page_id INTEGER "
+            "REFERENCES library_pages(id)"
+        )
+
     conn.commit()
     conn.close()
 def save_book(title, author, publication_year, publisher):
