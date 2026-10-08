@@ -1,4 +1,5 @@
 import os
+import asyncio
 import sqlite3
 
 from library_db import init_library_db
@@ -8,6 +9,7 @@ from knowledge_bridge import (
     get_library_fact,
 )
 from fact_extractor import extract_page_facts
+from ai_fact_extractor import extract_ai_facts
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -928,6 +930,44 @@ async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"❌ R2 ТЕСТ НЕ ПРОШЁЛ\n\n{type(error).__name__}: {error}"
         )
+
+async def ai_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🧠 Люся анализирует страницу 12 книги Jet..."
+    )
+
+    try:
+        facts = await asyncio.to_thread(
+            extract_ai_facts,
+            "DOC-000002",
+            12,
+        )
+
+        if not facts:
+            await update.message.reply_text(
+                "AI не нашёл фактов с подтверждёнными OCR-цитатами."
+            )
+            return
+
+        lines = ["📚 AI-АНАЛИЗ JET — PDF-страница 12"]
+
+        for number, item in enumerate(facts, 1):
+            lines.append(
+                f"\n{number}. {item['topic']}\n"
+                f"Факт: {item['fact']}\n"
+                f"Цитата: {item['quote']}"
+            )
+
+        result = "\n".join(lines)
+        await update.message.reply_text(result[:3900])
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ AI-тест остановлен: {type(error).__name__}: {error}"
+        )
+
+
+
 def main():
     init_db()
     init_library_db()
@@ -940,6 +980,7 @@ def main():
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CommandHandler("testbridge", test_bridge))
     app.add_handler(CommandHandler("extractjet", extract_jet))
+    app.add_handler(CommandHandler("aijet", ai_jet))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
