@@ -7,6 +7,7 @@ from knowledge_bridge import (
     save_library_fact,
     get_library_fact,
 )
+from fact_extractor import extract_page_facts
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -767,6 +768,42 @@ async def test_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"❌ Ошибка моста: {type(error).__name__}: {error}"
         )
+
+async def extract_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        candidates = extract_page_facts(
+            document_code="DOC-000002",
+            pdf_page=12,
+            limit=5,
+        )
+
+        if not candidates:
+            await update.message.reply_text(
+                "На странице 12 кандидаты не найдены."
+            )
+            return
+
+        lines = [
+            "🔎 JET — КАНДИДАТЫ НА ФАКТЫ",
+            "Документ: DOC-000002",
+            "PDF-страница: 12",
+            "",
+        ]
+
+        for number, sentence in enumerate(candidates, start=1):
+            lines.append(f"{number}. {sentence}\n")
+
+        lines.append("⚠️ Это фрагменты OCR, ещё не проверенные.")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ Ошибка извлечения: {type(error).__name__}: {error}"
+        )
+
+
+
 async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     test_checksum = "OMG-IMPORTER-TEST-V1"
 
@@ -902,6 +939,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
     app.add_handler(CommandHandler("testbridge", test_bridge))
+    app.add_handler(CommandHandler("extractjet", extract_jet))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
