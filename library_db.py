@@ -26,18 +26,7 @@ def init_library_db():
             )
         """)
         
-        columns = [
-            row[1]
-            for row in conn.execute(
-                "PRAGMA table_info(library_pages)"
-            ).fetchall()
-        ]
-
-        if "cleaned_text" not in columns:
-            conn.execute(
-                "ALTER TABLE library_pages "
-                "ADD COLUMN cleaned_text TEXT"
-            )
+        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS library_pages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +42,18 @@ def init_library_db():
                 UNIQUE(document_id, pdf_page)
             )
         """)
+        columns = [
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(library_pages)"
+            ).fetchall()
+        ]
 
+        if "cleaned_text" not in columns:
+            conn.execute(
+                "ALTER TABLE library_pages "
+                "ADD COLUMN cleaned_text TEXT"
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS library_import_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
