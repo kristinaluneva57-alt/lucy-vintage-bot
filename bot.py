@@ -2,6 +2,7 @@ import os
 import sqlite3
 
 from library_db import init_library_db
+from knowledge_bridge import init_knowledge_bridge
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -858,6 +859,7 @@ async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     init_library_db()
+    init_knowledge_bridge()
     seed_books()
     seed_knowledge()
     app = Application.builder().token(TOKEN).build()
