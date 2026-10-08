@@ -2,7 +2,11 @@ import os
 import sqlite3
 
 from library_db import init_library_db
-from knowledge_bridge import init_knowledge_bridge
+from knowledge_bridge import (
+    init_knowledge_bridge,
+    save_library_fact,
+    get_library_fact,
+)
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -732,6 +736,37 @@ async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("❌ В базе знаний пока пусто.")
+async def test_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        fact_id = save_library_fact(
+            document_code="DOC-000002",
+            pdf_page=12,
+            topic="Jet — проверка связи",
+            fact="Тестовая запись связи факта со страницей PDF.",
+            notes="Технический тест, не исторический факт.",
+        )
+
+        row = get_library_fact(fact_id)
+
+        if row is None:
+            raise ValueError("Факт не найден после сохранения")
+
+        topic, fact, status, title, code, pdf_page, printed_page = row
+
+        await update.message.reply_text(
+            f"✅ МОСТ РАБОТАЕТ\n"
+            f"ID факта: {fact_id}\n"
+            f"Книга: {title}\n"
+            f"Документ: {code}\n"
+            f"PDF-страница: {pdf_page}\n"
+            f"Статус: {status}\n"
+            f"Текст: {fact}"
+        )
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ Ошибка моста: {type(error).__name__}: {error}"
+        )
 async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     test_checksum = "OMG-IMPORTER-TEST-V1"
 
@@ -866,6 +901,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
+    app.add_handler(CommandHandler("testbridge", test_bridge))
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
