@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+from book_upload import receive_book_pdf
 
 from library_db import init_library_db
 from knowledge_bridge import (
@@ -1035,6 +1036,12 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
+        app.add_handler(
+        MessageHandler(
+            filters.Document.ALL,
+            receive_book_pdf
+        )
+    )
     app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )    
