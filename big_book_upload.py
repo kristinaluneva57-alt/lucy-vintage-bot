@@ -156,6 +156,17 @@ button:disabled { opacity: .5; }
 <div class="panel">
 <p>Загрузка больших книг напрямую в библиотеку.</p>
 <p>Максимальный размер: 250 МБ.</p>
+
+<label for="language">Язык книги:</label>
+<select id="language">
+  <option value="eng">🇬🇧 Английский</option>
+  <option value="ita">🇮🇹 Итальянский</option>
+  <option value="deu">🇩🇪 Немецкий</option>
+  <option value="fra">🇫🇷 Французский</option>
+  <option value="ces">🇨🇿 Чешский</option>
+  <option value="pol">🇵🇱 Польский</option>
+</select>
+
 <input type="file" id="file" accept=".pdf,application/pdf">
 <button id="send" onclick="uploadBook()">Загрузить книгу</button>
 <p id="status"></p>
@@ -208,8 +219,13 @@ async function uploadBook() {
   try {
     status("Подготавливаю загрузку...");
 
+    
     const prepared = await api("/prepare", {
       name: file.name,
+      size: file.size,
+      language: document.getElementById("language").value
+    });
+
       size: file.size
     });
 
@@ -268,6 +284,17 @@ def prepare():
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", ""))
     size = data.get("size")
+    
+    language = str(data.get("language", "eng"))
+
+    allowed_languages = {
+        "eng", "ita", "deu",
+        "fra", "ces", "pol"
+    }
+
+    if language not in allowed_languages:
+        return jsonify(error="Неизвестный язык книги"), 400
+
 
     if not name.lower().endswith(".pdf"):
         return jsonify(error="Нужен PDF"), 400
@@ -297,6 +324,7 @@ def prepare():
             "key": key,
             "title": name[:-4][:200] or "Без названия",
             "size": size,
+             "language": language,
             "user_id": user_id,
             "created": time.time(),
             "state": "prepared"
@@ -308,12 +336,12 @@ def prepare():
     )
 
 
-def process_book(key, title):
+def process_book(key, title, language):
     try:
         result = import_pdf_with_ocr(
             storage_key=key,
             title=title,
-            language="eng"
+            language=language
         )
 
         notify_admin(
@@ -373,11 +401,17 @@ def complete():
         if info["ContentLength"] != session["size"]:
             raise ValueError("Размер файла не совпадает")
 
+        
         worker = threading.Thread(
             target=process_book,
-            args=(session["key"], session["title"]),
+            args=(
+                session["key"],
+                session["title"],
+                session["language"]
+            ),
             daemon=True
         )
+
         worker.start()
 
         return jsonify(status="processing")
