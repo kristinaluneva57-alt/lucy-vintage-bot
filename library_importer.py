@@ -273,7 +273,13 @@ def clean_ocr_text(text):
     )
 
     return cleaned.strip()
-def ocr_pdf_page(file_path, pdf_page):
+
+def ocr_pdf_page(file_path, pdf_page, language="eng"):
+    """
+    Распознаёт скан PDF с указанным языком.
+    Поддерживает развороты из двух страниц.
+    """
+
     document = fitz.open(file_path)
 
     try:
@@ -281,35 +287,32 @@ def ocr_pdf_page(file_path, pdf_page):
 
         width = page.rect.width
         height = page.rect.height
-        middle = width / 2
 
-        left_rect = fitz.Rect(
-            0,
-            0,
-            middle,
-            height,
-        )
+        # Широкие развороты делим на две половины.
+        # Обычную страницу распознаём целиком.
+        if width > height * 1.15:
+            middle = width / 2
 
-        right_rect = fitz.Rect(
-            middle,
-            0,
-            width,
-            height,
-        )
+            regions = [
+                fitz.Rect(0, 0, middle, height),
+                fitz.Rect(middle, 0, width, height),
+            ]
+        else:
+            regions = [page.rect]
 
         texts = []
 
-        for clip in (left_rect, right_rect):
+        for region in regions:
             pix = page.get_pixmap(
                 matrix=fitz.Matrix(300 / 72, 300 / 72),
-                clip=clip,
+                clip=region,
                 alpha=False,
             )
 
             ocr_pdf = fitz.open(
                 "pdf",
                 pix.pdfocr_tobytes(
-                    language="eng",
+                    language=language,
                 ),
             )
 
@@ -329,6 +332,7 @@ def ocr_pdf_page(file_path, pdf_page):
 
     finally:
         document.close()
+
 
         
 def import_pdf_with_ocr(
@@ -388,6 +392,7 @@ def import_pdf_with_ocr(
                 text = ocr_pdf_page(
                     local_path,
                     pdf_page,
+                    language=language,
                 )
             cleaned_text = clean_ocr_text(text)
             page_status = (
