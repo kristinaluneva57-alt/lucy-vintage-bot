@@ -1036,7 +1036,7 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
-        app.add_handler(
+    app.add_handler(
         MessageHandler(
             filters.Document.ALL,
             receive_book_pdf
