@@ -2,6 +2,7 @@ import os
 import asyncio
 import sqlite3
 from book_upload import receive_book_pdf
+from big_book_upload import bigbook_command, start_upload_server
 
 from library_db import init_library_db
 from knowledge_bridge import (
@@ -1033,6 +1034,7 @@ def main():
     app.add_handler(CommandHandler("testimporter", test_importer))
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
+    app.add_handler(CommandHandler("bigbook", bigbook_command))
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
@@ -1049,7 +1051,8 @@ def main():
     app.add_handler(
         MessageHandler(filters.PHOTO, handle_message)
     )
-
+    
+    start_upload_server()
     app.run_polling()
 
 
