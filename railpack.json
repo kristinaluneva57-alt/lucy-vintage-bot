@@ -1,0 +1,16 @@
+
+{
+  "$schema": "https://schema.railpack.com",
+  "deploy": {
+    "aptPackages": [
+      "...",
+      "tesseract-ocr",
+      "tesseract-ocr-eng",
+      "tesseract-ocr-ita",
+      "tesseract-ocr-deu",
+      "tesseract-ocr-fra",
+      "tesseract-ocr-ces",
+      "tesseract-ocr-pol"
+    ]
+  }
+}
