@@ -186,8 +186,8 @@ class FakeMessage:
     async def reply_text(self, text, reply_markup=None, **kwargs):
         self.chat.sent.append(("text", text, reply_markup))
 
-    async def reply_photo(self, photo, **kwargs):
-        self.chat.sent.append(("photo", photo, None))
+    async def reply_photo(self, photo, caption=None, **kwargs):
+        self.chat.sent.append(("photo", photo, caption))
 
 
 class FakeChat:
@@ -260,6 +260,8 @@ class FakeChat:
             await self.bot.delete_callback(update, self.context)
         elif prefix == "box":
             await self.bot.box_callback(update, self.context)
+        elif prefix in ("vattr", "vsrc", "vsave"):
+            await self.bot.attribution_callback(update, self.context)
         elif prefix == "lorig":
             await self.bot.library_original_callback(update, self.context)
         else:

@@ -295,17 +295,22 @@ _TOC_LINE = re.compile(r"^.{2,80}?(?:\s|\.{2,}|…)\s*[0-9ivxlc]{1,4}\s*$", re.I
 _WORD = re.compile(r"[^\W\d_]{3,}")
 
 
-def page_quality(original_text, cleaned_text=None):
+def page_quality(original_text, cleaned_text=None, service_only=False):
     """Оценка 0..1: насколько страница похожа на связный текст книги.
 
     Низкая оценка — оглавление, выходные данные (копирайт, ISBN),
     указатели, списки литературы и OCR-мусор.
+
+    service_only=True — только служебные страницы (оглавление, выходные
+    данные, указатель). Короткий текст и OCR-мусор не штрафуются: так
+    выглядят страницы с иллюстрациями и рекламой, важные для атрибуции.
     """
     text = original_text or cleaned_text or ""
     lower = text.lower()
     quality = 1.0
 
-    strong = sum(1 for marker in STRONG_FRONT_MATTER if marker in lower)
+    strong_markers = STRONG_FRONT_MATTER - {"©"} if service_only else STRONG_FRONT_MATTER
+    strong = sum(1 for marker in strong_markers if marker in lower)
     weak = sum(1 for marker in FRONT_MATTER_MARKERS if marker in lower)
     if strong:
         quality *= 0.1
@@ -319,6 +324,9 @@ def page_quality(original_text, cleaned_text=None):
         toc_lines = sum(1 for line in lines if _TOC_LINE.match(line))
         if toc_lines / len(lines) > 0.35:
             quality *= 0.15
+
+    if service_only:
+        return quality
 
     tokens = re.findall(r"\S+", text)
     words = _WORD.findall(text)
