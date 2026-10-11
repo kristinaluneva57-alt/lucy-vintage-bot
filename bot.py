@@ -28,28 +28,34 @@ from telegram.ext import (
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DB_PATH = "/data/lucy_vintage.db"
 
-BTN_ADD_ITEM = "🔎 Добавить украшение"
 BTN_BOX = "🗃️ Моя шкатулка"
 BTN_LEARN = "🎓 Учиться"
 BTN_SEARCH = "📚 Найти информацию"
 BTN_NO_MARK = "🚫 Клейма нет"
 
 MAIN_MENU = [
-    [BTN_ADD_ITEM, BTN_BOX],
+    [BTN_BOX],
     [BTN_LEARN, BTN_SEARCH],
 ]
+
+# Кнопки внутри шкатулки (под сообщением).
+BOX_ADD_TEXT = "➕ Добавить украшение"
+BOX_LIST_TEXT = "💎 Мои украшения"
+BOX_PATH_ADD = f"«{BTN_BOX}» → «{BOX_ADD_TEXT}»"
+BOX_PATH_LIST = f"«{BTN_BOX}» → «{BOX_LIST_TEXT}»"
 
 # Кнопки старого меню. Из главного меню скрыты, но у кого-то
 # в чате ещё может висеть старая клавиатура — обработчики работают.
 LEGACY_BUTTONS = [
     "🔎 Определить украшение",
+    "🔎 Добавить украшение",
     "🗃 Моя шкатулка",
     "🆘 Найди мне это",
     "🧭 Разделы школы",
     "💬 Vintage Club",
 ]
 
-ADD_ITEM_BUTTONS = {BTN_ADD_ITEM, "🔎 Определить украшение"}
+ADD_ITEM_BUTTONS = {"🔎 Определить украшение", "🔎 Добавить украшение"}
 BOX_BUTTONS = {BTN_BOX, "🗃 Моя шкатулка"}
 
 MENU_BUTTONS = set(sum(MAIN_MENU, [])) | set(LEGACY_BUTTONS)
@@ -495,9 +501,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
         "Сейчас я в бета-версии и умею вот что:\n\n"
-        f"{BTN_ADD_ITEM} — заполним карточку находки: фото, клеймо, "
-        "размеры, история. Карточка сохранится в твоей шкатулке.\n"
-        f"{BTN_BOX} — все твои находки. Их видишь только ты.\n"
+        f"{BTN_BOX} — твои находки. Здесь можно добавить украшение "
+        "(фото, клеймо, размеры, история) и посмотреть сохранённые "
+        "карточки. Их видишь только ты.\n"
         f"{BTN_LEARN} — короткие уроки для начинающих.\n"
         f"{BTN_SEARCH} — поиск по книгам нашей библиотеки "
         "(пока по-английски).\n\n"
@@ -554,7 +560,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             "📸 Фото получила, но сейчас мы не заполняем карточку.\n\n"
             "Чтобы сохранить украшение в шкатулку, нажми "
-            f"«{BTN_ADD_ITEM}» — и я попрошу фото по шагам.",
+            f"{BOX_PATH_ADD} — и я попрошу фото по шагам.",
             reply_markup=main_keyboard(),
         )
         return
@@ -644,8 +650,7 @@ SEARCH_PROMPT = (
 FALLBACK_TEXT = (
     "🙈 Я пока не понимаю свободные вопросы — этому я ещё учусь.\n\n"
     "Сейчас я умею:\n"
-    f"{BTN_ADD_ITEM} — сохранить находку в шкатулку\n"
-    f"{BTN_BOX} — посмотреть свои находки\n"
+    f"{BTN_BOX} — добавить находку или посмотреть свои\n"
     f"{BTN_LEARN} — короткие уроки\n"
     f"{BTN_SEARCH} — поиск по книгам (по-английски)\n\n"
     "Выбери кнопку в меню 👇"
@@ -752,7 +757,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if anketa_in_progress(context) and text not in ADD_ITEM_BUTTONS:
             await update.message.reply_text(
                 "Анкету прервала — эта находка не сохранилась. "
-                f"Начать заново можно кнопкой «{BTN_ADD_ITEM}»."
+                f"Начать заново: {BOX_PATH_ADD}."
             )
         reset_anketa(context)
         await handle_menu_button(update, context, text)
@@ -850,7 +855,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📍 Происхождение: {provenance}\n"
             f"💬 Со слов продавца: {text}\n\n"
             "🔎 Статус атрибуции: не определено\n\n"
-            f"Карточка и фото сохранены в «{BTN_BOX}». 🗂✨\n\n"
+            f"Карточка и фото сохранены: {BOX_PATH_LIST}. 🗂✨\n\n"
             "Что дальше? Выбирай в меню 👇",
             reply_markup=main_keyboard(),
         )
@@ -899,19 +904,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(FALLBACK_TEXT, reply_markup=main_keyboard())
 
 
+async def start_anketa(message, context):
+    reset_anketa(context)
+    context.user_data["mode"] = "identify"
+    context.user_data["step"] = "front_photo"
+    await message.reply_text(
+        "➕ ДОБАВИТЬ УКРАШЕНИЕ\n\n"
+        "Заполним карточку находки — она сохранится в твоей шкатулке.\n\n"
+        "Начинаем с лицевой стороны.\n\n"
+        "📸 Пришли одно фото украшения целиком.\n\n"
+        "💬 Люся: Маленький секрет хорошей фотографии — "
+        "протри камеру телефона. Серьёзно. 😂\n"
+        "Лучше всего снимать при дневном свете возле окна, без вспышки."
+    )
+
+
+async def show_my_items(message, user_id):
+    items = get_items(user_id)
+
+    if not items:
+        await message.reply_text(
+            "💎 Твоя шкатулка пока пустая.\n\n"
+            f"Добавь первую находку: {BOX_PATH_ADD}.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(f"💎 {item_code}", callback_data=f"item:{item_code}")]
+        for item_code, measurements, weight in items
+    ]
+
+    await message.reply_text(
+        "💎 МОИ УКРАШЕНИЯ\n\n"
+        "Выбери находку, чтобы открыть её карточку:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def box_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "box:add":
+        await start_anketa(query.message, context)
+        return
+
+    if query.data == "box:list":
+        if anketa_in_progress(context):
+            await query.message.reply_text(
+                "Анкету прервала — эта находка не сохранилась. "
+                f"Начать заново: {BOX_PATH_ADD}."
+            )
+        reset_anketa(context)
+        await show_my_items(query.message, update.effective_user.id)
+
+
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if text in ADD_ITEM_BUTTONS:
-        context.user_data["mode"] = "identify"
-        context.user_data["step"] = "front_photo"
-        await update.message.reply_text(
-            "🔎 ДОБАВИТЬ УКРАШЕНИЕ\n\n"
-            "Заполним карточку находки — она сохранится в твоей шкатулке.\n\n"
-            "Начинаем с лицевой стороны.\n\n"
-            "📸 Пришли одно фото украшения целиком.\n\n"
-            "💬 Люся: Маленький секрет хорошей фотографии — "
-            "протри камеру телефона. Серьёзно. 😂\n"
-            "Лучше всего снимать при дневном свете возле окна, без вспышки."
-        )
+        await start_anketa(update.message, context)
     elif text == BTN_SEARCH:
         context.user_data["mode"] = "search"
         await update.message.reply_text(SEARCH_PROMPT)
@@ -952,30 +1003,13 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE,
             reply_markup=main_keyboard(),
         )
     elif text in BOX_BUTTONS:
-        items = get_items(update.effective_user.id)
-
-        if not items:
-            await update.message.reply_text(
-                "🗃 Твоя шкатулка пока пустая.\n\n"
-                f"Добавь первую находку через «{BTN_ADD_ITEM}».",
-                reply_markup=main_keyboard(),
-            )
-            return
-
-        keyboard = []
-
-        for item_code, measurements, weight in items:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"💎 {item_code}",
-                    callback_data=f"item:{item_code}"
-                )
-            ])
-
         await update.message.reply_text(
-            "🗃 МОЯ ШКАТУЛКА\n\n"
-            "Выбери находку, чтобы открыть её карточку:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "🗃️ МОЯ ШКАТУЛКА\n\n"
+            "Здесь живут твои находки. Их видишь только ты.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(BOX_ADD_TEXT, callback_data="box:add")],
+                [InlineKeyboardButton(BOX_LIST_TEXT, callback_data="box:list")],
+            ]),
         )
     elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
@@ -1346,6 +1380,7 @@ def main():
     app.add_handler(CommandHandler("importjet", import_jet))
     app.add_handler(CommandHandler("bigbook", bigbook_command))
     app.add_handler(CommandHandler("testenv", test_env))
+    app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
