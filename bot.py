@@ -28,12 +28,70 @@ from telegram.ext import (
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DB_PATH = "/data/lucy_vintage.db"
 
+BTN_BOX = "🗃️ Моя шкатулка"
+BTN_LEARN = "🎓 Учиться"
+BTN_SEARCH = "📚 Найти информацию"
+BTN_NO_MARK = "🚫 Клейма нет"
+
 MAIN_MENU = [
-    ["🔎 Определить украшение", "📚 Найти информацию"],
-    ["🆘 Найди мне это", "🎓 Учиться"],
-    ["🧭 Разделы школы", "🗃 Моя шкатулка"],
-    ["💬 Vintage Club"],
+    [BTN_BOX],
+    [BTN_LEARN, BTN_SEARCH],
 ]
+
+# Кнопки внутри шкатулки (под сообщением).
+BOX_ADD_TEXT = "➕ Добавить украшение"
+BOX_LIST_TEXT = "💎 Мои украшения"
+BOX_PATH_ADD = f"«{BTN_BOX}» → «{BOX_ADD_TEXT}»"
+BOX_PATH_LIST = f"«{BTN_BOX}» → «{BOX_LIST_TEXT}»"
+
+# Кнопки старого меню. Из главного меню скрыты, но у кого-то
+# в чате ещё может висеть старая клавиатура — обработчики работают.
+LEGACY_BUTTONS = [
+    "🔎 Определить украшение",
+    "🔎 Добавить украшение",
+    "🗃 Моя шкатулка",
+    "🆘 Найди мне это",
+    "🧭 Разделы школы",
+    "💬 Vintage Club",
+]
+
+ADD_ITEM_BUTTONS = {"🔎 Определить украшение", "🔎 Добавить украшение"}
+BOX_BUTTONS = {BTN_BOX, "🗃 Моя шкатулка"}
+
+MENU_BUTTONS = set(sum(MAIN_MENU, [])) | set(LEGACY_BUTTONS)
+
+ANKETA_KEYS = [
+    "front_photo",
+    "back_photo",
+    "mark_photo",
+    "details_photo",
+    "measurements",
+    "weight",
+    "provenance",
+    "seller_story",
+    "item_id",
+    "last_media_group",
+    "album_notice",
+]
+
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True)
+
+
+def reset_anketa(context):
+    """Полностью выходит из анкеты и забывает её черновик."""
+    context.user_data["mode"] = None
+    context.user_data["step"] = None
+    for key in ANKETA_KEYS:
+        context.user_data.pop(key, None)
+
+
+def anketa_in_progress(context):
+    return (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") is not None
+    )
 
 def init_db():
     
@@ -438,24 +496,23 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_photo(photo=details_photo)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start выводит из незаконченной анкеты.
-    context.user_data["mode"] = None
-    context.user_data["step"] = None
-
-    keyboard = ReplyKeyboardMarkup(
-        MAIN_MENU,
-        resize_keyboard=True,
-    )
+    reset_anketa(context)
 
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
-        "Помогу разобраться с украшением, найти нужную информацию "
-        "в школе, начать собственное расследование или выбрать, "
-        "что изучать дальше.\n\n"
-        "Не знаешь, с чего начать? Просто выбери 👇\n\n"
-        "Или напиши мне свой вопрос."
+        "Сейчас я в бета-версии и умею вот что:\n\n"
+        f"{BTN_BOX} — твои находки. Здесь можно добавить украшение "
+        "(фото, клеймо, размеры, история) и посмотреть сохранённые "
+        "карточки. Их видишь только ты.\n"
+        f"{BTN_LEARN} — короткие уроки для начинающих.\n"
+        f"{BTN_SEARCH} — поиск по книгам нашей библиотеки "
+        "(пока по-английски).\n\n"
+        "Отвечать на свободные вопросы я пока учусь — "
+        "скоро научусь. 🙂\n\n"
+        "Выбирай 👇"
     )
 
-    await update.message.reply_text(text, reply_markup=keyboard)
+    await update.message.reply_text(text, reply_markup=main_keyboard())
 
 
 PHOTO_STEP_HINTS = {
@@ -503,7 +560,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             "📸 Фото получила, но сейчас мы не заполняем карточку.\n\n"
             "Чтобы сохранить украшение в шкатулку, нажми "
-            "«🔎 Определить украшение» — и я попрошу фото по шагам."
+            f"{BOX_PATH_ADD} — и я попрошу фото по шагам.",
+            reply_markup=main_keyboard(),
         )
         return
 
@@ -538,7 +596,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["back_photo"] = message.photo[-1].file_id
         context.user_data["step"] = "mark_photo"
         mark_keyboard = ReplyKeyboardMarkup(
-            [["🚫 Клейма нет"]],
+            [[BTN_NO_MARK]] + MAIN_MENU,
             resize_keyboard=True
         )
         await message.reply_text(
@@ -559,7 +617,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Сохраняем её как отдельную зацепку — само клеймо "
             "ещё не считаем доказательством производителя.\n\n"
             "Теперь пришли крупное фото застёжки, шарнира, креплений "
-            "или другой характерной детали."
+            "или другой характерной детали.",
+            reply_markup=main_keyboard(),
         )
         return
     if step == "details_photo":
@@ -575,15 +634,146 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+SEARCH_PROMPT = (
+    "📚 НАЙТИ ИНФОРМАЦИЮ\n\n"
+    "Я ищу по текстам книг из нашей библиотеки.\n\n"
+    "⚠️ Пока это бета, и есть ограничения:\n"
+    "• книг в библиотеке пока немного, но их будет больше;\n"
+    "• книги на английском, поэтому пиши запрос по-английски: "
+    "bakelite, jet, Trifari, rhinestone, brooch;\n"
+    "• лучше одно-два слова, а не целый вопрос;\n"
+    "• я показываю фрагмент страницы как есть, после распознавания — "
+    "в нём могут быть опечатки.\n\n"
+    "Напиши, что ищем 🔎"
+)
+
+FALLBACK_TEXT = (
+    "🙈 Я пока не понимаю свободные вопросы — этому я ещё учусь.\n\n"
+    "Сейчас я умею:\n"
+    f"{BTN_BOX} — добавить находку или посмотреть свои\n"
+    f"{BTN_LEARN} — короткие уроки\n"
+    f"{BTN_SEARCH} — поиск по книгам (по-английски)\n\n"
+    "Выбери кнопку в меню 👇"
+)
+
+
+def has_cyrillic(text):
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
+
+
+def search_library(query):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT d.title, p.pdf_page, p.printed_page,
+                    COALESCE(p.cleaned_text, p.original_text)
+            FROM library_pages p
+            JOIN library_documents d ON d.id = p.document_id
+            WHERE COALESCE(p.cleaned_text, p.original_text) LIKE ?
+            ORDER BY d.id, p.pdf_page
+            LIMIT 3
+            """,
+            (f"%{query}%",)
+        )
+        return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+async def run_search(update: Update, query: str):
+    try:
+        results = await asyncio.to_thread(search_library, query)
+    except Exception as error:
+        print(f"Library search failed: {type(error).__name__}: {error}")
+        await update.message.reply_text(
+            "😔 Поиск по библиотеке сейчас не сработал. "
+            "Попробуй чуть позже.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    if not results:
+        if has_cyrillic(query):
+            hint = (
+                "Книги в библиотеке на английском — попробуй написать "
+                "запрос по-английски. Например: bakelite, jet, Trifari."
+            )
+        else:
+            hint = (
+                "Попробуй другое слово или более короткий запрос. "
+                "Книг пока немного, библиотека пополняется. 📚"
+            )
+        await update.message.reply_text(
+            f"🔎 По запросу «{query}» пока ничего не нашла.\n\n{hint}",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    for title, pdf_page, printed_page, page_text in results:
+        page_label = printed_page or f"PDF {pdf_page}"
+        position = max(0, page_text.lower().find(query.lower()))
+        start = max(0, position - 250)
+        end = min(len(page_text), position + len(query) + 500)
+        excerpt = page_text[start:end].strip()
+        if start > 0:
+            excerpt = "…" + excerpt
+        if end < len(page_text):
+            excerpt = excerpt + "…"
+
+        await update.message.reply_text(
+            f"📚 {title}\n"
+            f"📄 Страница: {page_label}\n\n"
+            f"{excerpt}"
+        )
+
+    await update.message.reply_text(
+        "Это фрагменты страниц после распознавания — "
+        "в тексте возможны опечатки. ✨\n"
+        f"Чтобы искать ещё, снова нажми «{BTN_SEARCH}».",
+        reply_markup=main_keyboard(),
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    if update.message is None:
+        return
+
     if update.message.photo:
         await handle_photo(update, context)
         return
-    if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "measurements"
-    ):
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    mode = context.user_data.get("mode")
+    step = context.user_data.get("step")
+
+    # Любая кнопка меню выводит из анкеты и поиска,
+    # чтобы её текст не записался как размер, вес и т.д.
+    if text in MENU_BUTTONS:
+        if anketa_in_progress(context) and text not in ADD_ITEM_BUTTONS:
+            await update.message.reply_text(
+                "Анкету прервала — эта находка не сохранилась. "
+                f"Начать заново: {BOX_PATH_ADD}."
+            )
+        reset_anketa(context)
+        await handle_menu_button(update, context, text)
+        return
+
+    if mode == "identify" and text == BTN_NO_MARK and step != "mark_photo":
+        if step in PHOTO_STEP_HINTS:
+            hint = PHOTO_STEP_HINTS[step]
+        else:
+            hint = TEXT_STEP_HINTS.get(step, "")
+        await update.message.reply_text(
+            "Шаг с клеймом уже позади. 🙂\n\n" + hint
+        )
+        return
+
+    if mode == "identify" and step == "measurements":
         context.user_data["measurements"] = text
         context.user_data["step"] = "weight"
 
@@ -593,116 +783,190 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Если есть весы — напиши вес украшения в граммах.\n"
             "Например: 24.6 г.\n\n"
             "Если весов нет — просто напиши «нет»."
-            )
+        )
         return
-    if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "weight"
-    ):
+
+    if mode == "identify" and step == "weight":
         context.user_data["weight"] = text
         context.user_data["step"] = "provenance"
 
         await update.message.reply_text(
-             f"Вес записала: {text} ⚖️✨\n\n"
-             "Теперь немного истории.\n"
-             "Напиши, где ты нашла или купила это украшение.\n\n"
-             "Например: блошиный рынок в Германии, антикварный магазин, "
-             "Vinted, наследство или что-то другое.\n\n"
-             "Если знаешь город или страну — тоже напиши. 📍"
-       )
+            f"Вес записала: {text} ⚖️✨\n\n"
+            "Теперь немного истории.\n"
+            "Напиши, где ты нашла или купила это украшение.\n\n"
+            "Например: блошиный рынок в Германии, антикварный магазин, "
+            "Vinted, наследство или что-то другое.\n\n"
+            "Если знаешь город или страну — тоже напиши. 📍"
+        )
         return
-    if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "provenance"
-    ):
+
+    if mode == "identify" and step == "provenance":
         context.user_data["provenance"] = text
         context.user_data["step"] = "seller_story"
 
         await update.message.reply_text(
-              f"Записала происхождение: {text} 📍✨\n\n"
-              "А теперь — история продавца.\n"
-              "Что тебе рассказывали об этом украшении?\n\n"
-              "Например: «принадлежало бабушке», «привезено из Франции», "
-              "«это точно 1930-е» и так далее.\n\n"
-              "Если ничего не рассказывали — просто напиши «нет».\n\n"
-              "💬 Люся: Историю продавца сохраняем отдельно. "
-              "Это зацепка, а не доказательство. 🔎"
+            f"Записала происхождение: {text} 📍✨\n\n"
+            "А теперь — история продавца.\n"
+            "Что тебе рассказывали об этом украшении?\n\n"
+            "Например: «принадлежало бабушке», «привезено из Франции», "
+            "«это точно 1930-е» и так далее.\n\n"
+            "Если ничего не рассказывали — просто напиши «нет».\n\n"
+            "💬 Люся: Историю продавца сохраняем отдельно. "
+            "Это зацепка, а не доказательство. 🔎"
         )
         return
-    if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "seller_story"
-    ):
-        context.user_data["seller_story"] = text
-        context.user_data["item_id"] = save_item(
-            context.user_data.get("measurements", "не указаны"),
-            context.user_data.get("weight", "не указан"),
-            context.user_data.get("provenance", "не указано"),
-            text,
-            context.user_data.get("front_photo"),
-            context.user_data.get("back_photo"),
-            context.user_data.get("mark_photo"),
-            context.user_data.get("details_photo"),
-            update.effective_user.id
-        )
-        context.user_data["step"] = "complete"
+
+    if mode == "identify" and step == "seller_story":
+        data = context.user_data
+        measurements = data.get("measurements", "не указаны")
+        weight = data.get("weight", "не указан")
+        provenance = data.get("provenance", "не указано")
+
+        try:
+            item_code = save_item(
+                measurements,
+                weight,
+                provenance,
+                text,
+                data.get("front_photo"),
+                data.get("back_photo"),
+                data.get("mark_photo"),
+                data.get("details_photo"),
+                update.effective_user.id
+            )
+        except Exception as error:
+            print(f"save_item failed: {type(error).__name__}: {error}")
+            await update.message.reply_text(
+                "😔 Не получилось сохранить карточку. "
+                "Ответы пока помню — пришли историю продавца ещё раз "
+                "через минуту.",
+                reply_markup=main_keyboard(),
+            )
+            return
+
+        # Анкета закончена: полностью выходим из неё.
+        reset_anketa(context)
 
         await update.message.reply_text(
-            f"🗂 КАРТОЧКА НАХОДКИ — {context.user_data['item_id']}\n\n"
+            f"🗂 КАРТОЧКА НАХОДКИ — {item_code}\n\n"
             "Я собрала основные данные об украшении:\n\n"
-            f"📏 Размеры: {context.user_data.get('measurements', 'не указаны')}\n"
-            f"⚖️ Вес: {context.user_data.get('weight', 'не указан')}\n"
-            f"📍 Происхождение: {context.user_data.get('provenance', 'не указано')}\n"
+            f"📏 Размеры: {measurements}\n"
+            f"⚖️ Вес: {weight}\n"
+            f"📍 Происхождение: {provenance}\n"
             f"💬 Со слов продавца: {text}\n\n"
             "🔎 Статус атрибуции: не определено\n\n"
-            "Фотографии и все зацепки тоже прошли по этапам.\n"
-            "Карточка сохранена в базе Люси. 🗂✨"
+            f"Карточка и фото сохранены: {BOX_PATH_LIST}. 🗂✨\n\n"
+            "Что дальше? Выбирай в меню 👇",
+            reply_markup=main_keyboard(),
         )
         return
+
     if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") == "mark_photo"
-        and text and text.strip().lower() in ["🚫 клейма нет", "клейма нет", "нет клейма", "нет"]
-     ):
+        mode == "identify"
+        and step == "mark_photo"
+        and text.lower() in [BTN_NO_MARK.lower(), "клейма нет", "нет клейма", "нет"]
+    ):
         context.user_data["step"] = "details_photo"
         await update.message.reply_text(
-                "Поняла — клейма нет. Это нормально. 👍\n\n"
-                "Отсутствие клейма ещё ничего не говорит о возрасте "
-                "или происхождении украшения.\n\n"
-                "Теперь пришли крупное фото застёжки, шарнира, креплений "
-                "или других необычных деталей. 🔎"
+            "Поняла — клейма нет. Это нормально. 👍\n\n"
+            "Отсутствие клейма ещё ничего не говорит о возрасте "
+            "или происхождении украшения.\n\n"
+            "Теперь пришли крупное фото застёжки, шарнира, креплений "
+            "или других необычных деталей. 🔎",
+            reply_markup=main_keyboard(),
         )
         return
-    if (
-        context.user_data.get("mode") == "identify"
-        and context.user_data.get("step") in PHOTO_STEP_HINTS
-        and text
-        and text not in sum(MAIN_MENU, [])
-    ):
+
+    if mode == "identify" and step in PHOTO_STEP_HINTS:
         await update.message.reply_text(
-            PHOTO_STEP_HINTS[context.user_data["step"]]
+            PHOTO_STEP_HINTS[step]
             + "\n\nЧтобы выйти из анкеты, нажми /start."
         )
         return
-    if text == "🔎 Определить украшение":
-        context.user_data["mode"] = "identify"
-        context.user_data["step"] = "front_photo"
+
+    if mode == "find":
+        reset_anketa(context)
         await update.message.reply_text(
-            "🔎 ОПРЕДЕЛИТЬ УКРАШЕНИЕ\n\n"
-            "Начинаем с лицевой стороны.\n\n"
-            "📸 Пришли одно фото украшения целиком.\n\n"
-            "💬 Люся: Маленький секрет хорошей фотографии — "
-            "протри камеру телефона. Серьёзно. 😂\n"
-            "Лучше всего снимать при дневном свете возле окна, без вспышки."
+            f"🔎 Приняла запрос:\n\n«{text}»\n\n"
+            "Я запомнила, что именно мы ищем. "
+            "Я посмотрю, что можно найти по этому запросу. 😈",
+            reply_markup=main_keyboard(),
         )
-    elif text == "📚 Найти информацию":
+        return
+
+    if mode == "search":
+        reset_anketa(context)
+        await run_search(update, text)
+        return
+
+    # Всё остальное: Люся не молчит.
+    reset_anketa(context)
+    await update.message.reply_text(FALLBACK_TEXT, reply_markup=main_keyboard())
+
+
+async def start_anketa(message, context):
+    reset_anketa(context)
+    context.user_data["mode"] = "identify"
+    context.user_data["step"] = "front_photo"
+    await message.reply_text(
+        "➕ ДОБАВИТЬ УКРАШЕНИЕ\n\n"
+        "Заполним карточку находки — она сохранится в твоей шкатулке.\n\n"
+        "Начинаем с лицевой стороны.\n\n"
+        "📸 Пришли одно фото украшения целиком.\n\n"
+        "💬 Люся: Маленький секрет хорошей фотографии — "
+        "протри камеру телефона. Серьёзно. 😂\n"
+        "Лучше всего снимать при дневном свете возле окна, без вспышки."
+    )
+
+
+async def show_my_items(message, user_id):
+    items = get_items(user_id)
+
+    if not items:
+        await message.reply_text(
+            "💎 Твоя шкатулка пока пустая.\n\n"
+            f"Добавь первую находку: {BOX_PATH_ADD}.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(f"💎 {item_code}", callback_data=f"item:{item_code}")]
+        for item_code, measurements, weight in items
+    ]
+
+    await message.reply_text(
+        "💎 МОИ УКРАШЕНИЯ\n\n"
+        "Выбери находку, чтобы открыть её карточку:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def box_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "box:add":
+        await start_anketa(query.message, context)
+        return
+
+    if query.data == "box:list":
+        if anketa_in_progress(context):
+            await query.message.reply_text(
+                "Анкету прервала — эта находка не сохранилась. "
+                f"Начать заново: {BOX_PATH_ADD}."
+            )
+        reset_anketa(context)
+        await show_my_items(query.message, update.effective_user.id)
+
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if text in ADD_ITEM_BUTTONS:
+        await start_anketa(update.message, context)
+    elif text == BTN_SEARCH:
         context.user_data["mode"] = "search"
-        await update.message.reply_text(
-            "📚 Что хочешь найти?\n\n"
-            "Напиши тему, материал, бренд, клеймо или технику — "
-            "а я попробую привести тебя к нужному разделу школы. 🔎"
-        )
-    elif text == "🎓 Учиться":
+        await update.message.reply_text(SEARCH_PROMPT)
+    elif text == BTN_LEARN:
         await update.message.reply_text(
             "🎓 OH MY GOD VINTAGE SCHOOL\n\n"
             "Здесь не будет лекции на два часа и экзамена в пятницу. 😏\n"
@@ -715,7 +979,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "https://kristinaluneva57-alt.github.io/oh-my-god-vintage/"
         )
     elif text == "🧭 Разделы школы":
-         await update.message.reply_text(
+        await update.message.reply_text(
             "🏛 OH MY GOD VINTAGE SCHOOL\n\n"
             "Добро пожаловать в энциклопедию винтажных украшений. ✨\n"
             "Здесь мы собираем всё — от эпох и материалов до клейм, "
@@ -735,34 +999,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔥 НАШИ РАССЛЕДОВАНИЯ\n"
             "🧭 ОПРЕДЕЛИТЕЛЬ\n\n"
             "💬 Люся: Выбирай, куда полезем. Я бы полезла сразу во всё, "
-            "но у меня работа такая. 😏"
-         )
-    elif text == "🗃 Моя шкатулка":
-        items = get_items(update.effective_user.id)
-
-        if not items:
-            await update.message.reply_text(
-                "🗃 Твоя шкатулка пока пустая.\n\n"
-                "Добавь первую находку через «🔎 Определить украшение»."
-            )
-            return
-
-        keyboard = []
-
-        for item_code, measurements, weight in items:
-            keyboard.append([
-            InlineKeyboardButton(
-            f"💎 {item_code}",
-            callback_data=f"item:{item_code}"
+            "но у меня работа такая. 😏",
+            reply_markup=main_keyboard(),
         )
-            ])
-
+    elif text in BOX_BUTTONS:
         await update.message.reply_text(
-    "🗃 МОЯ ШКАТУЛКА\n\n"
-    "Выбери находку, чтобы открыть её карточку:",
-    reply_markup=InlineKeyboardMarkup(keyboard)
-)
-        return
+            "🗃️ МОЯ ШКАТУЛКА\n\n"
+            "Здесь живут твои находки. Их видишь только ты.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(BOX_ADD_TEXT, callback_data="box:add")],
+                [InlineKeyboardButton(BOX_LIST_TEXT, callback_data="box:list")],
+            ]),
+        )
     elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
         await update.message.reply_text(
@@ -771,7 +1019,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Напиши мне, что именно нужно найти. Чем больше деталей — тем лучше. 🔎\n\n"
             "💬 Люся: Можно даже начать с «я не знаю, как эта зараза называется». Разберёмся. 😏"
         )
-
     elif text == "💬 Vintage Club":
         await update.message.reply_text(
             "💬 VINTAGE CLUB\n\n"
@@ -784,59 +1031,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤦‍♀️ наши ошибки и сомнительные покупки\n"
             "🏆 находка месяца и маленькие челленджи\n\n"
             "💬 Люся: Иногда лучший способ понять, что ты купила, — "
-            "показать это людям и коллективно удивиться. 😏"
-        )
-    elif context.user_data.get("mode") == "find" and text not in sum(MAIN_MENU, []):
-        query = text
-        context.user_data["mode"] = None
-        await update.message.reply_text(
-            f"🔎 Приняла запрос:\n\n«{query}»\n\n"
-            "Я запомнила, что именно мы ищем. "
-            "Я посмотрю, что можно найти по этому запросу. 😈"
-        )
-    elif context.user_data.get("mode") == "search" and text not in sum(MAIN_MENU, []):
-        query = text.strip()
-        context.user_data["mode"] = None
-
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT d.title, p.pdf_page, p.printed_page,
-                    COALESCE(p.cleaned_text, p.original_text)
-            FROM library_pages p
-            JOIN library_documents d ON d.id = p.document_id
-            WHERE COALESCE(p.cleaned_text, p.original_text) LIKE ?
-            ORDER BY d.id, p.pdf_page
-            LIMIT 5
-            """,
-            (f"%{query}%",)
+            "показать это людям и коллективно удивиться. 😏",
+            reply_markup=main_keyboard(),
         )
 
-        results = cursor.fetchall()
-        conn.close()
 
-        if not results:
-            await update.message.reply_text(
-                f"🔎 По запросу «{query}» пока ничего не нашла в библиотеке."
-            )
-            return
-
-        for title, pdf_page, printed_page, original_text in results:
-            page_label = printed_page or f"PDF {pdf_page}"
-            position = original_text.lower().find(query.lower())
-            start = max(0, position - 400)
-            end = min(len(original_text), position + len(query) + 800)
-            excerpt = original_text[start:end]
-
-            await update.message.reply_text(
-                f"📚 {title}\n"
-                f"📄 Страница: {page_label}\n\n"
-                f"{excerpt}"
-            )
-
-        return
 @admin_only
 async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
@@ -1181,6 +1380,7 @@ def main():
     app.add_handler(CommandHandler("importjet", import_jet))
     app.add_handler(CommandHandler("bigbook", bigbook_command))
     app.add_handler(CommandHandler("testenv", test_env))
+    app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
@@ -1189,12 +1389,20 @@ def main():
             receive_book_pdf
         )
     )
+    # Пока Люся работает только в личных сообщениях:
+    # в группе она не должна отвечать на каждое сообщение и фото.
     app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )    
-    
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            handle_message,
+        )
+    )
+
     app.add_handler(
-        MessageHandler(filters.PHOTO, handle_message)
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.PHOTO,
+            handle_message,
+        )
     )
     
     start_upload_server()
