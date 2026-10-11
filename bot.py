@@ -69,6 +69,7 @@ ANKETA_KEYS = [
     "front_photo",
     "back_photo",
     "mark_photo",
+    "mark_text",
     "details_photo",
     "measurements",
     "weight",
@@ -120,6 +121,7 @@ def init_db():
         ("mark_photo", "TEXT"),
         ("details_photo", "TEXT"),
         ("owner_user_id", "INTEGER"),
+        ("mark_text", "TEXT"),
     ]
 
     existing_columns = {
@@ -313,7 +315,8 @@ def save_item(
     back_photo,
     mark_photo,
     details_photo,
-    owner_user_id
+    owner_user_id,
+    mark_text=None
 ):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -329,9 +332,10 @@ def save_item(
         back_photo,
         mark_photo,
         details_photo,
-        owner_user_id
+        owner_user_id,
+        mark_text
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
     (
         measurements,
@@ -342,7 +346,8 @@ def save_item(
         back_photo,
         mark_photo,
         details_photo,
-        owner_user_id
+        owner_user_id,
+        mark_text
     )
     )
 
@@ -412,7 +417,8 @@ def get_item(item_code, user_id):
     cursor.execute(
         f"""
         SELECT item_code, measurements, weight, provenance,
-               seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo
+               seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo,
+               mark_text
         FROM items
         WHERE item_code = ?
           AND {OWNER_FILTER}
@@ -424,6 +430,14 @@ def get_item(item_code, user_id):
     conn.close()
 
     return item
+def mark_text_label(mark_text, mark_photo=None):
+    if mark_text:
+        return mark_text
+    if mark_photo:
+        return "не записана"
+    return "клейма нет"
+
+
 async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -447,7 +461,8 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         front_photo,
         back_photo,
         mark_photo,
-        details_photo
+        details_photo,
+        mark_text
     ) = item
     
     if front_photo:
@@ -463,7 +478,8 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "─── ПАСПОРТ ПРЕДМЕТА ───\n"
         f"📏 Размер: {measurements}\n"
         f"⚖️ Вес: {weight}\n"
-        f"📍 Происхождение: {provenance}\n\n"
+        f"📍 Происхождение: {provenance}\n"
+        f"🔖 Надпись на клейме: {mark_text_label(mark_text, mark_photo)}\n\n"
         "─── АТРИБУЦИЯ ───\n"
         f"◇ Статус: {attribution_status}\n\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
@@ -535,6 +551,12 @@ PHOTO_STEP_HINTS = {
 }
 
 TEXT_STEP_HINTS = {
+    "mark_text": (
+        "✍️ Сейчас жду текст, а не фото: перепиши, что написано "
+        "на клейме — буквы, цифры, значки.\n"
+        "Например: TRIFARI © PAT. PEND.\n"
+        "Если не разобрать — напиши «не читается»."
+    ),
     "measurements": (
         "Фото больше не нужно — все снимки уже есть. 📸✅\n\n"
         "Сейчас напиши размеры текстом, например: 52 × 38 мм."
@@ -617,13 +639,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if step == "mark_photo":
         context.user_data["mark_photo"] = message.photo[-1].file_id
-        context.user_data["step"] = "details_photo"
+        context.user_data["step"] = "mark_text"
         await message.reply_text(
             "Фото маркировки получила. 🔎✨\n\n"
             "Сохраняем её как отдельную зацепку — само клеймо "
             "ещё не считаем доказательством производителя.\n\n"
-            "Теперь пришли крупное фото застёжки, шарнира, креплений "
-            "или другой характерной детали.",
+            "✍️ Теперь перепиши текстом, что написано на клейме: "
+            "буквы, цифры, значки — как видишь.\n"
+            "Например: TRIFARI © PAT. PEND. или STERLING 925.\n\n"
+            "Если не разобрать — напиши «не читается».\n\n"
+            "💬 Люся: Текст клейма — это то, по чему я потом смогу найти "
+            "твою находку, когда в библиотеке появятся новые сведения. 🔎",
             reply_markup=main_keyboard(),
         )
         return
@@ -765,6 +791,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_menu_button(update, context, text)
         return
 
+    if mode == "identify" and step == "mark_text":
+        unreadable = {"не читается", "нечитаемо", "не разобрать", "-", "—"}
+        if text == BTN_NO_MARK:
+            context.user_data["mark_text"] = None
+            note = "Поняла — без надписи. 👍"
+        elif text.lower() in unreadable:
+            context.user_data["mark_text"] = "не читается"
+            note = "Записала: надпись не читается. Это тоже информация. 👍"
+        else:
+            context.user_data["mark_text"] = text[:200]
+            note = f"Записала надпись на клейме: {text[:200]} 🔖✨"
+        context.user_data["step"] = "details_photo"
+        await update.message.reply_text(
+            f"{note}\n\n"
+            "Теперь пришли крупное фото застёжки, шарнира, креплений "
+            "или другой характерной детали. 📸"
+        )
+        return
+
     if mode == "identify" and text == BTN_NO_MARK and step != "mark_photo":
         if step in PHOTO_STEP_HINTS:
             hint = PHOTO_STEP_HINTS[step]
@@ -823,6 +868,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         measurements = data.get("measurements", "не указаны")
         weight = data.get("weight", "не указан")
         provenance = data.get("provenance", "не указано")
+        mark_label = mark_text_label(data.get("mark_text"), data.get("mark_photo"))
 
         try:
             item_code = save_item(
@@ -834,7 +880,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data.get("back_photo"),
                 data.get("mark_photo"),
                 data.get("details_photo"),
-                update.effective_user.id
+                update.effective_user.id,
+                data.get("mark_text"),
             )
         except Exception as error:
             print(f"save_item failed: {type(error).__name__}: {error}")
@@ -855,6 +902,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📏 Размеры: {measurements}\n"
             f"⚖️ Вес: {weight}\n"
             f"📍 Происхождение: {provenance}\n"
+            f"🔖 Надпись на клейме: {mark_label}\n"
             f"💬 Со слов продавца: {text}\n\n"
             "🔎 Статус атрибуции: не определено\n\n"
             f"Карточка и фото сохранены: {BOX_PATH_LIST}. 🗂✨\n\n"
