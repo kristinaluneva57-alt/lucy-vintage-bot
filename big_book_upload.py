@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request, render_template_string
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from library_importer import import_pdf_with_ocr
+from library_importer import OCR_LANGUAGES, import_pdf_with_ocr
 
 
 log = logging.getLogger(__name__)
@@ -165,6 +165,7 @@ button:disabled { opacity: .5; }
   <option value="fra">🇫🇷 Французский</option>
   <option value="ces">🇨🇿 Чешский</option>
   <option value="pol">🇵🇱 Польский</option>
+  <option value="rus">🇷🇺 Русский</option>
 </select>
 
 <input type="file" id="file" accept=".pdf,application/pdf">
@@ -284,12 +285,7 @@ def prepare():
     
     language = str(data.get("language", "eng"))
 
-    allowed_languages = {
-        "eng", "ita", "deu",
-        "fra", "ces", "pol"
-    }
-
-    if language not in allowed_languages:
+    if language not in OCR_LANGUAGES:
         return jsonify(error="Неизвестный язык книги"), 400
 
 
@@ -341,10 +337,16 @@ def process_book(key, title, language):
             language=language
         )
 
+        heading = (
+            "✅ КНИГА В БИБЛИОТЕКЕ"
+            if result.get("created", True)
+            else "📚 ЭТА КНИГА УЖЕ БЫЛА В БИБЛИОТЕКЕ (дубль не создан)"
+        )
         notify_admin(
-            "✅ КНИГА В БИБЛИОТЕКЕ\n\n"
+            f"{heading}\n\n"
             f"📚 {title}\n"
             f"Документ: {result['document_code']}\n"
+            f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
             f"Страниц: {result['total_pages']}\n"
             f"Обработано: {result['completed_pages']}\n"
             f"Статус: {result['status']}"

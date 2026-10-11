@@ -1,11 +1,30 @@
 import hashlib
 import os
 import re
+import shutil
+import tempfile
+import threading
 import fitz
 import urllib.request
 import boto3
 
 from library_db import get_connection
+
+
+# Языки OCR (коды Tesseract), которые установлены на сервере (railpack.json).
+OCR_LANGUAGES = {
+    "eng": "английский",
+    "ita": "итальянский",
+    "deu": "немецкий",
+    "fra": "французский",
+    "ces": "чешский",
+    "pol": "польский",
+    "rus": "русский",
+}
+
+# Одна книга распознаётся за раз, откуда бы её ни загрузили
+# (Telegram, /bigbook, /reocr). Остальные ждут своей очереди.
+_import_lock = threading.Lock()
 
 
 def calculate_checksum(file_path):
@@ -121,10 +140,14 @@ def save_page(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(document_id, pdf_page)
             DO UPDATE SET
-                printed_page = excluded.printed_page,
+                printed_page = COALESCE(
+                    excluded.printed_page, library_pages.printed_page
+                ),
                 original_text = excluded.original_text,
                 cleaned_text = excluded.cleaned_text,
-                russian_text = excluded.russian_text,
+                russian_text = COALESCE(
+                    excluded.russian_text, library_pages.russian_text
+                ),
                 extraction_status = excluded.extraction_status
             """,
             (
@@ -335,122 +358,238 @@ def ocr_pdf_page(file_path, pdf_page, language="eng"):
 
 
         
-def import_pdf_with_ocr(
-    storage_key,
-    title,
-    language="eng",
+def get_page_text(document_id, pdf_page):
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT original_text
+            FROM library_pages
+            WHERE document_id = ? AND pdf_page = ?
+            """,
+            (document_id, pdf_page),
+        ).fetchone()
+    return (row[0] or "") if row else ""
+
+
+def _ocr_document(
+    document_id,
+    local_path,
+    language,
+    start_page,
+    total_pages,
+    force_ocr=False,
 ):
-    local_path = "/tmp/library_import.pdf"
+    """Распознаёт страницы start_page..total_pages и сохраняет их.
 
-    download_pdf_from_r2(storage_key, local_path)
+    Уже распознанный текст не затирается пустым: если новое
+    распознавание ничего не дало, старый текст страницы остаётся.
+    """
+    for pdf_page in range(start_page, total_pages + 1):
+        text = ""
 
-    checksum = calculate_checksum(local_path)
-
-    document_id, document_code, created = register_document(
-        title=title,
-        storage_key=storage_key,
-        language=language,
-        checksum=checksum,
-    )
-
-    status, last_completed_page, error_message = get_import_progress(
-        document_id
-    )
-
-    pdf_info = inspect_pdf(local_path)
-    total_pages = pdf_info["page_count"]
-
-    start_page = last_completed_page + 1
-
-    if start_page > total_pages:
-        update_import_progress(
-            document_id,
-            total_pages,
-            status="completed",
-            error_message=None,
-        )
-
-        return {
-            "document_id": document_id,
-            "document_code": document_code,
-            "total_pages": total_pages,
-            "completed_pages": total_pages,
-            "status": "completed",
-        }
-
-    try:
-        for pdf_page in range(start_page, total_pages + 1):
+        if not force_ocr:
             document = fitz.open(local_path)
-
             try:
                 page = document.load_page(pdf_page - 1)
                 text = page.get_text("text").strip()
             finally:
                 document.close()
 
-            if not text:
-                text = ocr_pdf_page(
-                    local_path,
-                    pdf_page,
-                    language=language,
-                )
-            cleaned_text = clean_ocr_text(text)
-            page_status = (
-                "extracted"
-                if text
-                else "empty"
+        if not text:
+            text = ocr_pdf_page(
+                local_path,
+                pdf_page,
+                language=language,
             )
 
+        if text or not get_page_text(document_id, pdf_page):
             save_page(
                 document_id=document_id,
                 pdf_page=pdf_page,
                 original_text=text,
-                cleaned_text=cleaned_text,
-                extraction_status=page_status,
-            )
-
-            update_import_progress(
-                document_id,
-                pdf_page,
-                status="processing",
-                error_message=None,
+                cleaned_text=clean_ocr_text(text),
+                extraction_status="extracted" if text else "empty",
             )
 
         update_import_progress(
             document_id,
-            total_pages,
-            status="completed",
+            pdf_page,
+            status="processing",
             error_message=None,
         )
 
-        return {
-            "document_id": document_id,
-            "document_code": document_code,
-            "total_pages": total_pages,
-            "completed_pages": total_pages,
-            "status": "completed",
-        }
 
+def _run_import(document_id, document_code, local_path, language, restart, force_ocr):
+    if restart:
+        update_import_progress(
+            document_id, 0, status="pending", error_message=None
+        )
+
+    _, last_completed_page, _ = get_import_progress(document_id)
+
+    total_pages = inspect_pdf(local_path)["page_count"]
+    start_page = last_completed_page + 1
+
+    try:
+        if start_page <= total_pages:
+            _ocr_document(
+                document_id,
+                local_path,
+                language,
+                start_page,
+                total_pages,
+                force_ocr=force_ocr,
+            )
     except Exception as error:
-        completed_page = max(
-            start_page - 1,
-            0,
-        )
-
-        status, saved_page, _ = get_import_progress(
-            document_id
-        )
-
-        completed_page = max(
-            completed_page,
-            saved_page,
-        )
-
+        _, saved_page, _ = get_import_progress(document_id)
         update_import_progress(
             document_id,
-            completed_page,
+            max(start_page - 1, saved_page, 0),
             status="error",
-            error_message=f"{type(error).__name__}: {error}",
+            error_message=f"{type(error).__name__}: {error}"[:500],
         )
-
         raise
+
+    update_import_progress(
+        document_id,
+        total_pages,
+        status="completed",
+        error_message=None,
+    )
+
+    return {
+        "document_id": document_id,
+        "document_code": document_code,
+        "total_pages": total_pages,
+        "completed_pages": total_pages,
+        "status": "completed",
+    }
+
+
+def import_pdf_with_ocr(
+    storage_key,
+    title,
+    language="eng",
+):
+    """Скачивает PDF из R2, регистрирует книгу и распознаёт её.
+
+    Повторная загрузка того же файла не создаёт дубль (сверка по
+    контрольной сумме): незаконченный импорт продолжается с места
+    остановки, законченный — сразу возвращает результат.
+    """
+    with _import_lock:
+        temp_dir = tempfile.mkdtemp(prefix="lucy_import_")
+        try:
+            local_path = os.path.join(temp_dir, "book.pdf")
+            download_pdf_from_r2(storage_key, local_path)
+
+            checksum = calculate_checksum(local_path)
+
+            document_id, document_code, created = register_document(
+                title=title,
+                storage_key=storage_key,
+                language=language,
+                checksum=checksum,
+            )
+
+            result = _run_import(
+                document_id,
+                document_code,
+                local_path,
+                language,
+                restart=False,
+                force_ocr=False,
+            )
+            result["created"] = created
+            return result
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def get_document(document_code):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT id, document_code, title, storage_key, language
+            FROM library_documents
+            WHERE document_code = ?
+            """,
+            (document_code,),
+        ).fetchone()
+
+
+def reocr_document(document_code, language, force_ocr=False):
+    """Повторно распознаёт уже загруженную книгу из R2 без новой загрузки.
+
+    Страницы перезаписываются по мере распознавания, ничего не удаляется.
+    force_ocr=True распознаёт даже страницы, где в PDF уже есть
+    текстовый слой (например, плохое OCR сканера).
+    """
+    if language not in OCR_LANGUAGES:
+        raise ValueError(f"Неизвестный язык OCR: {language}")
+
+    with _import_lock:
+        document = get_document(document_code)
+        if document is None:
+            raise LookupError(f"Документ {document_code} не найден")
+
+        document_id, document_code, title, storage_key, _ = document
+        if not storage_key or not storage_key.startswith("books/"):
+            raise LookupError(f"У {document_code} нет PDF в хранилище")
+
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE library_documents SET language = ? WHERE id = ?",
+                (language, document_id),
+            )
+            exists = conn.execute(
+                "SELECT 1 FROM library_import_jobs WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO library_import_jobs (document_id, status) "
+                    "VALUES (?, 'pending')",
+                    (document_id,),
+                )
+
+        temp_dir = tempfile.mkdtemp(prefix="lucy_reocr_")
+        try:
+            local_path = os.path.join(temp_dir, "book.pdf")
+            download_pdf_from_r2(storage_key, local_path)
+            result = _run_import(
+                document_id,
+                document_code,
+                local_path,
+                language,
+                restart=True,
+                force_ocr=force_ocr,
+            )
+            result["title"] = title
+            return result
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def list_documents():
+    """Каталог библиотеки: книги, язык, статус импорта и страницы."""
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT
+                d.document_code,
+                d.title,
+                d.language,
+                COALESCE(j.status, '—'),
+                COALESCE(j.last_completed_page, 0),
+                (SELECT COUNT(*) FROM library_pages p
+                 WHERE p.document_id = d.id),
+                (SELECT COUNT(*) FROM library_pages p
+                 WHERE p.document_id = d.id
+                   AND COALESCE(p.original_text, '') = ''),
+                d.storage_key
+            FROM library_documents d
+            LEFT JOIN library_import_jobs j ON j.document_id = d.id
+            ORDER BY d.id
+            """
+        ).fetchall()
