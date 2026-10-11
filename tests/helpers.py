@@ -103,6 +103,8 @@ def _stub_missing_modules():
             pass
 
         class OpenAI:
+            """Заглушка: тесты подменяют её своим поддельным клиентом."""
+
             def __init__(self, *args, **kwargs):
                 raise OpenAIError("openai не установлен")
 
@@ -249,6 +251,8 @@ class FakeChat:
             await self.bot.delete_callback(update, self.context)
         elif prefix == "box":
             await self.bot.box_callback(update, self.context)
+        elif prefix == "lorig":
+            await self.bot.library_original_callback(update, self.context)
         else:
             raise ValueError(data)
         return self.sent[start:]

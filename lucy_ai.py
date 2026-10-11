@@ -149,9 +149,18 @@ def build_messages(history, question):
     return messages
 
 
-def ask_openai(messages):
-    """Синхронный вызов OpenAI. Возвращает текст ответа или бросает AIUnavailable."""
-    if not ai_enabled():
+def ask_openai(
+    messages,
+    max_tokens=MAX_ANSWER_TOKENS,
+    temperature=0.3,
+    check_enabled=True,
+):
+    """Синхронный вызов OpenAI. Возвращает текст ответа или бросает AIUnavailable.
+
+    check_enabled=False — выключатель обычного чата (LUCY_AI_ENABLED)
+    не проверяется: так библиотечный ИИ работает со своим выключателем.
+    """
+    if check_enabled and not ai_enabled():
         raise AIUnavailable("disabled")
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -160,15 +169,14 @@ def ask_openai(messages):
 
     import openai
 
-    client = openai.OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
-
     started = time.monotonic()
     try:
+        client = openai.OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
         response = client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
-            max_completion_tokens=MAX_ANSWER_TOKENS,
-            temperature=0.3,
+            max_completion_tokens=max_tokens,
+            temperature=temperature,
         )
     except openai.OpenAIError as error:
         code = getattr(error, "code", None)

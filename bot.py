@@ -4,6 +4,7 @@ import sqlite3
 import time
 
 import library_search
+import library_ai
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
@@ -1186,8 +1187,9 @@ SEARCH_PROMPT = (
     "• русские слова я перевожу по своему словарю ювелирных терминов — "
     "если слова там нет, скажу об этом. Марки и клейма можно писать "
     "латиницей: Trifari, Coro, Napier;\n"
-    "• показываю оригинальный текст страницы после распознавания — "
-    "без перевода, в нём бывают опечатки.\n\n"
+    "• отвечаю по-русски только по найденным страницам и указываю книгу "
+    "и страницу. Точный текст книги — по кнопке «📄 Оригинал». "
+    "Если в книгах мало сведений, так и скажу.\n\n"
     "Напиши, что ищем 🔎"
 )
 
@@ -1203,7 +1205,8 @@ FALLBACK_TEXT = (
 
 def search_library(query):
     plan = library_search.build_search_plan(query)
-    return plan, library_search.search_pages(DB_PATH, plan)
+    # Берём с запасом: служебные страницы потом отсеиваются.
+    return plan, library_search.search_pages(DB_PATH, plan, limit=6)
 
 
 def _short_terms(terms, limit=8):
@@ -1211,7 +1214,127 @@ def _short_terms(terms, limit=8):
     return shown + (" …" if len(terms) > limit else "")
 
 
-async def run_search(update: Update, query: str):
+def original_buttons(answer_id, numbers):
+    buttons = [
+        InlineKeyboardButton(f"📄 Оригинал [{n}]", callback_data=f"lorig:{answer_id}:{n}")
+        for n in numbers
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def answer_with_library_ai(update, context, query, results):
+    """Пробует ответить по-русски через ИИ по фрагментам книг.
+
+    Возвращает (True, None), если ответ отправлен, или (False, пояснение),
+    если нужно показать обычный поиск.
+    """
+    if not library_ai.enabled():
+        return False, None
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        return False, None
+
+    fragments = library_ai.select_fragments(results)
+    if not fragments:
+        return False, None
+
+    user_id = update.effective_user.id
+    unlimited = is_admin(user_id)
+
+    try:
+        key = await asyncio.to_thread(library_ai.query_key, DB_PATH, query)
+        cached = await asyncio.to_thread(library_ai.find_cached, DB_PATH, key)
+    except Exception as error:
+        print(f"Library AI cache failed: {type(error).__name__}: {error}")
+        return False, None
+
+    if cached:
+        answer_id, answer, cached_fragments = cached
+        reply, numbers = library_ai.format_reply(answer, cached_fragments)
+        await update.message.reply_text(
+            reply, reply_markup=original_buttons(answer_id, numbers)
+        )
+        return True, None
+
+    if not unlimited:
+        try:
+            total = library_ai.used_today_total(DB_PATH)
+            mine = library_ai.used_today(DB_PATH, user_id)
+        except Exception as error:
+            print(f"Library AI usage failed: {type(error).__name__}: {error}")
+            return False, None
+        if total >= library_ai.daily_total_limit() or mine >= library_ai.daily_limit():
+            return False, (
+                "На сегодня пересказы по книгам закончились "
+                f"(до {library_ai.daily_limit()} в день). Показываю найденные "
+                "фрагменты в оригинале."
+            )
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="typing"
+        )
+    except Exception:
+        pass
+
+    try:
+        answer = await asyncio.to_thread(library_ai.ask, fragments, query)
+    except lucy_ai.AIUnavailable as problem:
+        if problem.reason != "disabled":
+            await notify_admin_ai_problem(context, problem.reason)
+        return False, (
+            "Пересказ по-русски сейчас недоступен — показываю найденные "
+            "фрагменты в оригинале."
+        )
+    except Exception as error:
+        print(f"Library AI failed: {type(error).__name__}")
+        return False, (
+            "Пересказ по-русски сейчас недоступен — показываю найденные "
+            "фрагменты в оригинале."
+        )
+
+    try:
+        answer_id = await asyncio.to_thread(
+            library_ai.save_answer, DB_PATH, key, query, answer, fragments
+        )
+        if not unlimited:
+            await asyncio.to_thread(library_ai.record_question, DB_PATH, user_id)
+    except Exception as error:
+        print(f"Library AI save failed: {type(error).__name__}: {error}")
+        answer_id = None
+
+    reply, numbers = library_ai.format_reply(answer, fragments)
+    markup = original_buttons(answer_id, numbers) if answer_id else None
+    await update.message.reply_text(reply, reply_markup=markup)
+    return True, None
+
+
+async def library_original_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, answer_id, number = query.data.split(":")
+        fragment = library_ai.get_fragment(DB_PATH, int(answer_id), int(number))
+    except Exception as error:
+        print(f"Library original failed: {type(error).__name__}: {error}")
+        fragment = None
+
+    if fragment is None:
+        await query.message.reply_text("Не нашла этот фрагмент. 🔎")
+        return
+
+    await query.message.reply_text(
+        f"📄 ОРИГИНАЛ [{fragment['n']}]\n"
+        f"📚 {fragment['title']}\n"
+        f"📄 {library_ai.page_label(fragment)}\n"
+        f"🌐 Язык: {library_search.language_name(fragment.get('language'))}\n\n"
+        "Точный текст страницы после распознавания (без перевода, "
+        "возможны опечатки OCR):\n\n"
+        f"{fragment['text']}"[:3900]
+    )
+
+
+async def run_search(update: Update, context, query: str):
     try:
         plan, results = await asyncio.to_thread(search_library, query)
     except Exception as error:
@@ -1250,13 +1373,24 @@ async def run_search(update: Update, query: str):
         )
         return
 
-    for result in results:
+    answered, note = await answer_with_library_ai(update, context, query, results)
+    if answered:
+        await update.message.reply_text(
+            f"Чтобы искать ещё, снова нажми «{BTN_SEARCH}»." + unknown_note,
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    if note:
+        await update.message.reply_text(f"ℹ️ {note}")
+
+    for result in results[:library_search.MAX_RESULTS]:
         page_label = result["printed_page"] or f"PDF {result['pdf_page']}"
         fragment = library_search.excerpt(result["text"], result["position"])
         await update.message.reply_text(
             f"📚 {result['title']}\n"
             f"🌐 Язык книги: {library_search.language_name(result['language'])}\n"
-            f"📄 Страница: {page_label}\n"
+            f"📄 Страница: {page_label} (PDF-стр. {result['pdf_page']})\n"
             f"🔎 Совпадения: {_short_terms(result['matched'], 5)}\n\n"
             "Оригинальный текст (после распознавания, без перевода):\n"
             f"{fragment}"
@@ -1468,7 +1602,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "search":
         reset_anketa(context)
-        await run_search(update, text)
+        await run_search(update, context, text)
         return
 
     # Всё остальное — свободный вопрос. Люся не молчит.
@@ -2169,6 +2303,7 @@ def main():
     init_library_db()
     init_knowledge_bridge()
     lucy_ai.init_ai_usage_table(DB_PATH)
+    library_ai.init_tables(DB_PATH)
     seed_books()
     seed_knowledge()
     app = Application.builder().token(TOKEN).build()
@@ -2191,6 +2326,7 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
+    app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
     app.add_handler(
         MessageHandler(
             filters.Document.ALL,

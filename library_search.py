@@ -10,6 +10,7 @@
 страницы после распознавания, а не перевод и не пересказ.
 """
 
+import math
 import re
 import sqlite3
 
@@ -276,10 +277,81 @@ def _like_value(term):
     return "%" + term.rstrip("=").replace("%", "").replace("_", "") + "%"
 
 
+# Признаки служебных страниц: оглавление, выходные данные, указатели.
+FRONT_MATTER_MARKERS = [
+    "contents", "table of contents", "index", "copyright", "isbn",
+    "all rights reserved", "printed in", "published by", "publisher",
+    "acknowledgements", "acknowledgments", "bibliography", "further reading",
+    "list of illustrations", "photographs by", "cover:", "series editor",
+    "indice", "sommario", "tutti i diritti", "stampato in",
+    "inhaltsverzeichnis", "inhalt", "alle rechte", "gedruckt in",
+    "sommaire", "table des matières", "tous droits", "imprimé en",
+    "obsah", "rejstřík", "všechna práva", "spis treści", "wszelkie prawa",
+    "оглавление", "содержание", "все права защищены",
+]
+STRONG_FRONT_MATTER = {"isbn", "all rights reserved", "copyright", "©"}
+
+_TOC_LINE = re.compile(r"^.{2,80}?(?:\s|\.{2,}|…)\s*[0-9ivxlc]{1,4}\s*$", re.IGNORECASE)
+_WORD = re.compile(r"[^\W\d_]{3,}")
+
+
+def page_quality(original_text, cleaned_text=None):
+    """Оценка 0..1: насколько страница похожа на связный текст книги.
+
+    Низкая оценка — оглавление, выходные данные (копирайт, ISBN),
+    указатели, списки литературы и OCR-мусор.
+    """
+    text = original_text or cleaned_text or ""
+    lower = text.lower()
+    quality = 1.0
+
+    strong = sum(1 for marker in STRONG_FRONT_MATTER if marker in lower)
+    weak = sum(1 for marker in FRONT_MATTER_MARKERS if marker in lower)
+    if strong:
+        quality *= 0.1
+    elif weak >= 2:
+        quality *= 0.25
+    elif weak == 1:
+        quality *= 0.7
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) >= 4:
+        toc_lines = sum(1 for line in lines if _TOC_LINE.match(line))
+        if toc_lines / len(lines) > 0.35:
+            quality *= 0.15
+
+    tokens = re.findall(r"\S+", text)
+    words = _WORD.findall(text)
+    if tokens:
+        word_ratio = len(words) / len(tokens)
+        if word_ratio < 0.5:
+            quality *= 0.3
+        elif word_ratio < 0.65:
+            quality *= 0.7
+    if len(words) < 15:
+        quality *= 0.2  # обложка, подпись, заголовок
+    elif len(words) < 40:
+        quality *= 0.5
+
+    return quality
+
+
+def _page_regexes(plan):
+    return [
+        (weight, [(term.rstrip("="), _term_regex(term)) for term in group_terms])
+        for _, group_terms, weight in plan.groups
+    ]
+
+
 def search_pages(db_path, plan, limit=MAX_RESULTS):
     """Ищет страницы по плану. Возвращает список результатов по убыванию
     релевантности: dict(title, language, pdf_page, printed_page, text,
-    matched=[термины], position)."""
+    original_text, document_code, matched=[термины], position,
+    positions=[позиции совпадений], quality, score).
+
+    Содержательные страницы с многократными совпадениями идут выше
+    оглавлений, выходных данных и OCR-мусора.
+    """
     terms = plan.all_terms
     if not terms:
         return []
@@ -292,7 +364,8 @@ def search_pages(db_path, plan, limit=MAX_RESULTS):
         rows = conn.execute(
             f"""
             SELECT d.title, d.language, p.pdf_page, p.printed_page,
-                   COALESCE(p.cleaned_text, p.original_text)
+                   COALESCE(p.cleaned_text, p.original_text),
+                   p.original_text, d.document_code
             FROM library_pages p
             JOIN library_documents d ON d.id = p.document_id
             WHERE COALESCE(d.storage_key, '') LIKE 'books/%'
@@ -305,55 +378,104 @@ def search_pages(db_path, plan, limit=MAX_RESULTS):
     finally:
         conn.close()
 
-    regexes = [
-        (weight, [(term.rstrip("="), _term_regex(term)) for term in group_terms])
-        for _, group_terms, weight in plan.groups
-    ]
+    regexes = _page_regexes(plan)
     has_specific = any(weight >= 1 for weight, _ in regexes)
 
     scored = []
-    for title, language, pdf_page, printed_page, text in rows:
+    for title, language, pdf_page, printed_page, text, original, code in rows:
         if not text:
             continue
         matched = []
         first_position = None
         position_weight = -1.0
+        positions = []
+        occurrences = 0
         groups_hit = 0
         score = 0.0
         specific_hit = False
         for weight, group in regexes:
             hit = False
             for term, regex in group:
-                found = regex.search(text)
-                if found:
-                    hit = True
-                    if term not in matched:
-                        matched.append(term)
-                    # Фрагмент строим вокруг самого конкретного совпадения.
-                    if weight > position_weight:
-                        first_position = found.start()
-                        position_weight = weight
+                found_all = list(regex.finditer(text))
+                if not found_all:
+                    continue
+                hit = True
+                occurrences += len(found_all)
+                if weight >= 1 or not has_specific:
+                    positions.extend(match.start() for match in found_all)
+                if term not in matched:
+                    matched.append(term)
+                # Фрагмент строим вокруг самого конкретного совпадения.
+                if weight > position_weight:
+                    first_position = found_all[0].start()
+                    position_weight = weight
             if hit:
                 groups_hit += 1
                 score += weight
                 specific_hit = specific_hit or weight >= 1
         if groups_hit and (specific_hit or not has_specific):
+            quality = page_quality(original, text)
+            relevance = score * (1 + math.log1p(occurrences)) * quality
             scored.append((
-                -score,
+                -relevance,
                 {
                     "title": title,
                     "language": language,
                     "pdf_page": pdf_page,
                     "printed_page": printed_page,
                     "text": text,
+                    "original_text": original or text,
+                    "document_code": code,
                     "matched": matched,
                     "position": first_position or 0,
+                    "positions": sorted(positions),
                     "groups_hit": groups_hit,
+                    "quality": quality,
+                    "score": relevance,
                 },
             ))
 
     scored.sort(key=lambda item: item[0])
     return [result for _, result in scored[:limit]]
+
+
+def passages(result, max_passages=2, before=350, after=750):
+    """Вырезает из страницы до max_passages фрагментов вокруг совпадений.
+
+    Текст фрагментов — точный текст страницы после распознавания
+    (без перевода и правок). Соседние совпадения объединяются.
+    """
+    text = result["text"]
+    windows = []
+    for position in result.get("positions") or [result.get("position", 0)]:
+        start = max(0, position - before)
+        end = min(len(text), position + after)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+
+    # Самые «плотные» окна — с наибольшим числом совпадений.
+    def density(window):
+        return sum(1 for p in result.get("positions", []) if window[0] <= p < window[1])
+
+    windows = sorted(windows, key=density, reverse=True)[:max_passages]
+    windows.sort()
+
+    fragments = []
+    for start, end in windows:
+        # Не обрываем на полуслове.
+        while start > 0 and not text[start - 1].isspace():
+            start -= 1
+        while end < len(text) and not text[end - 1].isspace():
+            end += 1
+        fragment = text[start:end].strip()
+        if start > 0:
+            fragment = "…" + fragment
+        if end < len(text):
+            fragment += "…"
+        fragments.append(fragment)
+    return fragments
 
 
 def excerpt(text, position, before=250, after=450):
