@@ -14,13 +14,38 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from library_db import get_connection
-from library_importer import import_pdf_with_ocr, calculate_checksum
+from library_importer import (
+    OCR_LANGUAGES,
+    calculate_checksum,
+    import_pdf_with_ocr,
+)
 
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 _upload_lock = asyncio.Lock()
+
+
+# Подпись к PDF → код языка OCR. Можно писать код или название языка.
+LANGUAGE_ALIASES = {
+    "eng": "eng", "en": "eng", "english": "eng", "английский": "eng", "англ": "eng",
+    "ita": "ita", "it": "ita", "italian": "ita", "итальянский": "ita", "итал": "ita",
+    "deu": "deu", "de": "deu", "ger": "deu", "german": "deu", "немецкий": "deu", "нем": "deu",
+    "fra": "fra", "fr": "fra", "french": "fra", "французский": "fra", "франц": "fra",
+    "ces": "ces", "cs": "ces", "cze": "ces", "czech": "ces", "чешский": "ces", "чеш": "ces",
+    "pol": "pol", "pl": "pol", "polish": "pol", "польский": "pol", "польск": "pol",
+    "rus": "rus", "ru": "rus", "russian": "rus", "русский": "rus", "рус": "rus",
+}
+
+
+def language_from_caption(caption):
+    """Возвращает (код языка, распознан_ли). По умолчанию английский."""
+    for word in (caption or "").lower().replace(",", " ").split():
+        word = word.strip(".:;!?#")
+        if word in LANGUAGE_ALIASES:
+            return LANGUAGE_ALIASES[word], True
+    return "eng", False
 
 
 def find_duplicate(checksum):
@@ -118,6 +143,8 @@ async def receive_book_pdf(
         )
         return
 
+    language, language_given = language_from_caption(message.caption)
+
     async with _upload_lock:
 
         title = (
@@ -187,28 +214,18 @@ async def receive_book_pdf(
                     storage_key,
                 )
 
+            language_note = (
+                "" if language_given else
+                "\n\nЯзык не указан — распознаю как английский. "
+                "Для другого языка пришли PDF с подписью, например: ita, "
+                "немецкий, rus."
+            )
             await message.reply_text(
                 "📖 Книга сохранена в R2.\n"
-                "Начинаю распознавание страниц…"
-            )
-
-            # Reuse our existing importer.
-            result = await asyncio.to_thread(
-                import_pdf_with_ocr,
-                storage_key,
-                title,
-                "eng",
-            )
-
-            await message.reply_text(
-                "✅ КНИГА В БИБЛИОТЕКЕ\n\n"
-                f"📚 {title}\n"
-                f"Документ: {result['document_code']}\n"
-                f"PDF-страниц: {result['total_pages']}\n"
-                f"Обработано: {result['completed_pages']}\n"
-                f"Статус: {result['status']}\n\n"
-                "OCR сканов пока работает "
-                "на английском языке."
+                f"🔤 Язык распознавания: {OCR_LANGUAGES[language]}.\n"
+                "Распознаю страницы в фоне — Люся при этом продолжает "
+                "отвечать всем. Напишу, когда закончу."
+                + language_note
             )
 
         except Exception:
@@ -222,3 +239,36 @@ async def receive_book_pdf(
                 "в журнале Railway.\n"
                 "Существующие книги не затронуты."
             )
+            return
+
+    # Распознавание — в фоне, чтобы бот не «замирал» для всех на время OCR.
+    context.application.create_task(
+        _import_and_report(message, storage_key, title, language)
+    )
+
+
+async def _import_and_report(message, storage_key, title, language):
+    try:
+        result = await asyncio.to_thread(
+            import_pdf_with_ocr,
+            storage_key,
+            title,
+            language,
+        )
+        await message.reply_text(
+            "✅ КНИГА В БИБЛИОТЕКЕ\n\n"
+            f"📚 {title}\n"
+            f"Документ: {result['document_code']}\n"
+            f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
+            f"PDF-страниц: {result['total_pages']}\n"
+            f"Обработано: {result['completed_pages']}\n"
+            f"Статус: {result['status']}"
+        )
+    except Exception:
+        logger.exception("PDF import failed")
+        await message.reply_text(
+            f"❌ Не удалось распознать «{title}».\n"
+            "PDF уже сохранён в R2 — можно продолжить командой "
+            "/reocr, когда исправим причину. Подробности — в журнале "
+            "Railway.\nСуществующие книги не затронуты."
+        )

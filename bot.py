@@ -13,6 +13,7 @@ from knowledge_bridge import (
 )
 from fact_extractor import extract_page_facts
 from ai_fact_extractor import extract_ai_facts, save_ai_facts
+from library_importer import OCR_LANGUAGES, reocr_document, list_documents
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -1361,6 +1362,103 @@ async def save_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+LANGUAGE_CODES_HELP = ", ".join(
+    f"{code} ({name})" for code, name in OCR_LANGUAGES.items()
+)
+
+
+@admin_only
+async def reocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [arg.strip() for arg in (context.args or [])]
+    if len(args) < 2 or args[1].lower() not in OCR_LANGUAGES:
+        await update.message.reply_text(
+            "🔁 ПОВТОРНОЕ РАСПОЗНАВАНИЕ\n\n"
+            "Формат: /reocr DOC-000003 ita\n"
+            "С принудительным OCR всех страниц (если в PDF плохой "
+            "текстовый слой): /reocr DOC-000003 ita force\n\n"
+            f"Языки: {LANGUAGE_CODES_HELP}\n\n"
+            "Коды книг — в /books."
+        )
+        return
+
+    document_code = args[0].upper()
+    language = args[1].lower()
+    force_ocr = len(args) > 2 and args[2].lower() == "force"
+
+    await update.message.reply_text(
+        f"🔁 Ставлю {document_code} на повторное распознавание "
+        f"({OCR_LANGUAGES[language]}"
+        + (", все страницы через OCR" if force_ocr else "")
+        + ").\nPDF возьму из R2, заново загружать не нужно. "
+        "Существующие страницы не удаляются. Напишу, когда закончу."
+    )
+
+    context.application.create_task(
+        _reocr_and_report(update.message, document_code, language, force_ocr)
+    )
+
+
+async def _reocr_and_report(message, document_code, language, force_ocr):
+    try:
+        result = await asyncio.to_thread(
+            reocr_document, document_code, language, force_ocr
+        )
+        await message.reply_text(
+            "✅ ПОВТОРНОЕ РАСПОЗНАВАНИЕ ГОТОВО\n\n"
+            f"📚 {result['title']}\n"
+            f"Документ: {result['document_code']}\n"
+            f"Язык OCR: {OCR_LANGUAGES[language]}\n"
+            f"Страниц: {result['total_pages']}"
+        )
+    except LookupError as error:
+        await message.reply_text(f"❌ {error}")
+    except Exception as error:
+        print(f"reocr failed: {type(error).__name__}: {error}")
+        await message.reply_text(
+            f"❌ Повторное распознавание {document_code} остановлено.\n"
+            "Уже распознанные страницы сохранены. Подробности — в журнале "
+            "Railway. Можно запустить команду ещё раз."
+        )
+
+
+@admin_only
+async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        rows = await asyncio.to_thread(list_documents)
+    except Exception as error:
+        print(f"list_documents failed: {type(error).__name__}: {error}")
+        await update.message.reply_text("❌ Не получилось прочитать каталог.")
+        return
+
+    books = [row for row in rows if (row[7] or "").startswith("books/")]
+    if not books:
+        await update.message.reply_text("📚 В библиотеке пока нет книг.")
+        return
+
+    status_icons = {
+        "completed": "✅", "processing": "⏳",
+        "pending": "🕓", "error": "❌",
+    }
+    lines = [f"📚 КАТАЛОГ БИБЛИОТЕКИ — {len(books)} книг\n"]
+    for code, title, language, status, last_page, pages, empty, _ in books:
+        icon = status_icons.get(status, "•")
+        lines.append(
+            f"{icon} {code} · {title[:60]}\n"
+            f"   язык: {OCR_LANGUAGES.get(language or '', language or '—')} · "
+            f"страниц: {pages} (пустых: {empty}) · статус: {status}"
+            + (f" (до стр. {last_page})" if status in ("processing", "error") else "")
+        )
+
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            await update.message.reply_text(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await update.message.reply_text(chunk)
+
+
 def main():
     init_db()
     init_library_db()
@@ -1380,6 +1478,8 @@ def main():
     app.add_handler(CommandHandler("importjet", import_jet))
     app.add_handler(CommandHandler("bigbook", bigbook_command))
     app.add_handler(CommandHandler("testenv", test_env))
+    app.add_handler(CommandHandler("reocr", reocr_command))
+    app.add_handler(CommandHandler("books", books_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
