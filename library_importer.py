@@ -483,6 +483,9 @@ def import_pdf_with_ocr(
             local_path = os.path.join(temp_dir, "book.pdf")
             download_pdf_from_r2(storage_key, local_path)
 
+            # SHA-256 и размер — от байтов, которые реально лежат в R2
+            # под ключом ЭТОЙ загрузки (а не от имени файла или числа страниц).
+            size = os.path.getsize(local_path)
             checksum = calculate_checksum(local_path)
 
             document_id, document_code, created = register_document(
@@ -491,6 +494,8 @@ def import_pdf_with_ocr(
                 language=language,
                 checksum=checksum,
             )
+            before = None if created else stored_document_info(document_id)
+            already_done = bool(before) and before["status"] == "completed"
 
             result = _run_import(
                 document_id,
@@ -501,11 +506,89 @@ def import_pdf_with_ocr(
                 force_ocr=False,
             )
             result["created"] = created
-            result.update(_detect_metadata_safely(document_id))
-            _visual_index_safely(document_id, local_path)
+            # Готовый документ-дубль не трогаем: ни метаданные, ни индекс.
+            if not already_done:
+                _detect_metadata_safely(document_id)
+                _visual_index_safely(document_id, local_path)
+
+            # В сообщение — то, что реально сохранено в каталоге (в том числе
+            # название, исправленное вручную через /settitle).
+            info = stored_document_info(document_id)
+            result["meta_title"] = info["meta_title"]
+            result["meta_author"] = info["meta_author"]
+            result["meta_manual"] = info["meta_source"] == "manual"
+            result["upload"] = {
+                "size": size,
+                "sha256": checksum,
+                "storage_key": storage_key,
+            }
+            if not created:
+                result["duplicate"] = {
+                    "document_code": document_code,
+                    "file_title": before["title"],
+                    "created_at": before["created_at"],
+                    "pages": before["last_completed_page"],
+                    "status": before["status"],
+                    "storage_key": before["storage_key"],
+                }
+            print(
+                "book import: "
+                f"key={storage_key} size={size} sha256={checksum} "
+                f"document={document_code} created={created}"
+            )
             return result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def stored_document_info(document_id):
+    """Что сохранено в каталоге о документе (для сообщений и диагностики)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT d.document_code, d.title, d.meta_title, d.meta_author,
+                   d.meta_source, d.created_at, d.checksum, d.storage_key,
+                   (SELECT status FROM library_import_jobs j
+                     WHERE j.document_id = d.id ORDER BY j.id DESC LIMIT 1),
+                   (SELECT last_completed_page FROM library_import_jobs j
+                     WHERE j.document_id = d.id ORDER BY j.id DESC LIMIT 1)
+            FROM library_documents d WHERE d.id = ?
+            """,
+            (document_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    keys = ("document_code", "title", "meta_title", "meta_author", "meta_source",
+            "created_at", "checksum", "storage_key", "status", "last_completed_page")
+    return dict(zip(keys, row))
+
+
+def format_size(size):
+    return f"{size:,} байт ({size / 1024 / 1024:.1f} МБ)".replace(",", " ")
+
+
+def diagnostic_lines(result, file_name=None, session_id=None):
+    """Безопасная диагностика загрузки: без ссылок, токенов и ключей доступа."""
+    upload = result.get("upload") or {}
+    lines = ["", "🔎 ПРОВЕРКА ФАЙЛА"]
+    if file_name:
+        lines.append(f"Выбранный файл: {file_name}")
+    if upload.get("size") is not None:
+        lines.append(f"Получено сервером: {format_size(upload['size'])}")
+    if upload.get("sha256"):
+        lines.append(f"SHA-256: {upload['sha256']}")
+    if session_id:
+        lines.append(f"Сессия загрузки: {session_id[:8]}")
+    duplicate = result.get("duplicate")
+    if duplicate:
+        lines += [
+            f"Дубликат: {duplicate['document_code']} — SHA-256 совпал полностью, "
+            "то есть файл байт в байт тот же, что уже загружен.",
+            f"Исходное имя файла {duplicate['document_code']}: «{duplicate['file_title']}»",
+            f"Добавлен: {duplicate['created_at'] or 'неизвестно'} · распознано страниц: "
+            f"{duplicate['pages'] if duplicate['pages'] is not None else '?'}",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def metadata_lines(result):
