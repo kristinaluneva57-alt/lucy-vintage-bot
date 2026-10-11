@@ -55,6 +55,7 @@ def init_db():
         ("back_photo", "TEXT"),
         ("mark_photo", "TEXT"),
         ("details_photo", "TEXT"),
+        ("owner_user_id", "INTEGER"),
     ]
 
     existing_columns = {
@@ -247,7 +248,8 @@ def save_item(
     front_photo,
     back_photo,
     mark_photo,
-    details_photo
+    details_photo,
+    owner_user_id
 ):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -262,9 +264,10 @@ def save_item(
         front_photo,
         back_photo,
         mark_photo,
-        details_photo
+        details_photo,
+        owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
     (
         measurements,
@@ -274,7 +277,8 @@ def save_item(
         front_photo,
         back_photo,
         mark_photo,
-        details_photo
+        details_photo,
+        owner_user_id
     )
     )
 
@@ -290,12 +294,27 @@ def save_item(
     conn.close()
 
     return item_code
-def get_items():
+def is_admin(user_id):
+    admin_id = os.environ.get("LUCY_ADMIN_ID", "").strip()
+    return bool(admin_id) and str(user_id) == admin_id
+
+
+# Старые находки без владельца видит только администратор.
+OWNER_FILTER = "(owner_user_id = ? OR (owner_user_id IS NULL AND ?))"
+
+
+def get_items(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT item_code, measurements, weight FROM items ORDER BY id DESC"
+        f"""
+        SELECT item_code, measurements, weight
+        FROM items
+        WHERE {OWNER_FILTER}
+        ORDER BY id DESC
+        """,
+        (user_id, is_admin(user_id))
     )
 
     items = cursor.fetchall()
@@ -303,18 +322,19 @@ def get_items():
 
     return items
     
-def get_item(item_code):
+def get_item(item_code, user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute(
-        """
+        f"""
         SELECT item_code, measurements, weight, provenance,
                seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo
         FROM items
         WHERE item_code = ?
+          AND {OWNER_FILTER}
         """,
-        (item_code,)
+        (item_code, user_id, is_admin(user_id))
     )
 
     item = cursor.fetchone()
@@ -326,7 +346,7 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     item_code = query.data.split(":", 1)[1]
-    item = get_item(item_code)
+    item = get_item(item_code, update.effective_user.id)
 
     if not item:
         await query.message.reply_text(
@@ -382,7 +402,7 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     item_code = query.data.split(":", 1)[1]
-    item = get_item(item_code)
+    item = get_item(item_code, update.effective_user.id)
 
     if not item:
         await query.message.reply_text("Не смогла найти эту карточку. 🔎")
@@ -530,7 +550,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get("front_photo"),
             context.user_data.get("back_photo"),
             context.user_data.get("mark_photo"),
-            context.user_data.get("details_photo")
+            context.user_data.get("details_photo"),
+            update.effective_user.id
         )
         context.user_data["step"] = "complete"
 
@@ -614,7 +635,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "но у меня работа такая. 😏"
          )
     elif text == "🗃 Моя шкатулка":
-        items = get_items()
+        items = get_items(update.effective_user.id)
 
         if not items:
             await update.message.reply_text(
