@@ -1,6 +1,8 @@
 import os
 import asyncio
 import sqlite3
+
+import library_search
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
@@ -638,14 +640,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 SEARCH_PROMPT = (
     "📚 НАЙТИ ИНФОРМАЦИЮ\n\n"
-    "Я ищу по текстам книг из нашей библиотеки.\n\n"
-    "⚠️ Пока это бета, и есть ограничения:\n"
-    "• книг в библиотеке пока немного, но их будет больше;\n"
-    "• книги на английском, поэтому пиши запрос по-английски: "
-    "bakelite, jet, Trifari, rhinestone, brooch;\n"
-    "• лучше одно-два слова, а не целый вопрос;\n"
-    "• я показываю фрагмент страницы как есть, после распознавания — "
-    "в нём могут быть опечатки.\n\n"
+    "Я ищу по текстам книг нашей библиотеки — на английском, "
+    "итальянском, немецком, французском, чешском, польском и русском.\n\n"
+    "Пиши запрос по-русски, например:\n"
+    "• бакелит\n"
+    "• чешское стекло\n"
+    "• клейма Trifari\n\n"
+    "⚠️ Это бета:\n"
+    "• книг пока немного, библиотека пополняется;\n"
+    "• русские слова я перевожу по своему словарю ювелирных терминов — "
+    "если слова там нет, скажу об этом. Марки и клейма можно писать "
+    "латиницей: Trifari, Coro, Napier;\n"
+    "• показываю оригинальный текст страницы после распознавания — "
+    "без перевода, в нём бывают опечатки.\n\n"
     "Напиши, что ищем 🔎"
 )
 
@@ -654,39 +661,24 @@ FALLBACK_TEXT = (
     "Сейчас я умею:\n"
     f"{BTN_BOX} — добавить находку или посмотреть свои\n"
     f"{BTN_LEARN} — короткие уроки\n"
-    f"{BTN_SEARCH} — поиск по книгам (по-английски)\n\n"
+    f"{BTN_SEARCH} — поиск по книгам библиотеки\n\n"
     "Выбери кнопку в меню 👇"
 )
 
 
-def has_cyrillic(text):
-    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
-
-
 def search_library(query):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT d.title, p.pdf_page, p.printed_page,
-                    COALESCE(p.cleaned_text, p.original_text)
-            FROM library_pages p
-            JOIN library_documents d ON d.id = p.document_id
-            WHERE COALESCE(p.cleaned_text, p.original_text) LIKE ?
-            ORDER BY d.id, p.pdf_page
-            LIMIT 3
-            """,
-            (f"%{query}%",)
-        )
-        return cursor.fetchall()
-    finally:
-        conn.close()
+    plan = library_search.build_search_plan(query)
+    return plan, library_search.search_pages(DB_PATH, plan)
+
+
+def _short_terms(terms, limit=8):
+    shown = ", ".join(terms[:limit])
+    return shown + (" …" if len(terms) > limit else "")
 
 
 async def run_search(update: Update, query: str):
     try:
-        results = await asyncio.to_thread(search_library, query)
+        plan, results = await asyncio.to_thread(search_library, query)
     except Exception as error:
         print(f"Library search failed: {type(error).__name__}: {error}")
         await update.message.reply_text(
@@ -696,44 +688,50 @@ async def run_search(update: Update, query: str):
         )
         return
 
-    if not results:
-        if has_cyrillic(query):
-            hint = (
-                "Книги в библиотеке на английском — попробуй написать "
-                "запрос по-английски. Например: bakelite, jet, Trifari."
-            )
-        else:
-            hint = (
-                "Попробуй другое слово или более короткий запрос. "
-                "Книг пока немного, библиотека пополняется. 📚"
-            )
+    unknown_note = ""
+    if plan.unknown_words:
+        unknown_note = (
+            "\n\n🤔 Этих слов нет в моём словаре, я их не перевела: "
+            + ", ".join(f"«{word}»" for word in plan.unknown_words)
+            + ". Попробуй синоним или напиши термин латиницей."
+        )
+
+    if not plan.groups:
         await update.message.reply_text(
-            f"🔎 По запросу «{query}» пока ничего не нашла.\n\n{hint}",
+            "🔎 Не поняла, что искать. Напиши материал, вид украшения, "
+            "технику или марку — например: бакелит, брошь, клейма Trifari."
+            + unknown_note,
             reply_markup=main_keyboard(),
         )
         return
 
-    for title, pdf_page, printed_page, page_text in results:
-        page_label = printed_page or f"PDF {pdf_page}"
-        position = max(0, page_text.lower().find(query.lower()))
-        start = max(0, position - 250)
-        end = min(len(page_text), position + len(query) + 500)
-        excerpt = page_text[start:end].strip()
-        if start > 0:
-            excerpt = "…" + excerpt
-        if end < len(page_text):
-            excerpt = excerpt + "…"
-
+    if not results:
         await update.message.reply_text(
-            f"📚 {title}\n"
-            f"📄 Страница: {page_label}\n\n"
-            f"{excerpt}"
+            f"🔎 По запросу «{query}» пока ничего не нашла.\n\n"
+            f"Искала: {_short_terms(plan.all_terms)}.\n"
+            "Книг пока немного — библиотека пополняется. 📚"
+            + unknown_note,
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    for result in results:
+        page_label = result["printed_page"] or f"PDF {result['pdf_page']}"
+        fragment = library_search.excerpt(result["text"], result["position"])
+        await update.message.reply_text(
+            f"📚 {result['title']}\n"
+            f"🌐 Язык книги: {library_search.language_name(result['language'])}\n"
+            f"📄 Страница: {page_label}\n"
+            f"🔎 Совпадения: {_short_terms(result['matched'], 5)}\n\n"
+            "Оригинальный текст (после распознавания, без перевода):\n"
+            f"{fragment}"
         )
 
     await update.message.reply_text(
-        "Это фрагменты страниц после распознавания — "
-        "в тексте возможны опечатки. ✨\n"
-        f"Чтобы искать ещё, снова нажми «{BTN_SEARCH}».",
+        "Это точные фрагменты страниц после распознавания — не перевод "
+        "и не пересказ. В тексте возможны опечатки распознавания. ✨\n"
+        f"Чтобы искать ещё, снова нажми «{BTN_SEARCH}»."
+        + unknown_note,
         reply_markup=main_keyboard(),
     )
 
