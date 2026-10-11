@@ -154,7 +154,8 @@ class CatalogTest(unittest.IsolatedAsyncioTestCase):
     # --- каталог ---
 
     async def test_catalog_lists_all_documents(self):
-        replies = await self.admin.say("/books")
+        # Прежний полный список сохранён: /books all.
+        replies = await self.admin.say("/books all")
         catalog = "\n".join(texts(replies))
         self.assertIn("Всего документов: 3 · книг: 2", catalog)
         self.assertIn("DOC-000005 · Название не определено", catalog)
@@ -307,7 +308,7 @@ class CatalogTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ничего не удаляется", report)
         self.assertEqual(self.snapshot(), before)
 
-        catalog = "\n".join(texts(await self.admin.say("/books")))
+        catalog = "\n".join(texts(await self.admin.say("/books all")))
         self.assertIn("Дубликаты: точных 1, возможных 1", catalog)
 
     async def test_dupes_hash_fills_only_empty_checksums(self):

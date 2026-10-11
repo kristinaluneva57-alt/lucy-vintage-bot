@@ -9,6 +9,7 @@ import library_ai
 import library_catalog
 import attribution
 import page_images
+import book_thumbnails
 import visual_ai
 import visual_index
 from functools import wraps
@@ -26,7 +27,7 @@ from ai_fact_extractor import extract_ai_facts, save_ai_facts
 import lucy_ai
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
-from library_importer import OCR_LANGUAGES, reocr_document, list_documents
+from library_importer import OCR_LANGUAGES, reocr_document, list_documents, get_page_text
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -3130,21 +3131,271 @@ def format_catalog(documents, exact, possible):
     return lines
 
 
-@admin_only
-async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def send_full_catalog(message):
+    """Прежний полный текстовый список (/books all)."""
     try:
         documents = await asyncio.to_thread(library_catalog.catalog)
         exact, possible = await asyncio.to_thread(library_catalog.find_duplicates, documents)
     except Exception as error:
         print(f"catalog failed: {type(error).__name__}: {error}")
-        await update.message.reply_text("❌ Не получилось прочитать каталог.")
+        await message.reply_text("❌ Не получилось прочитать каталог.")
         return
 
     if not documents:
-        await update.message.reply_text("📚 В библиотеке пока нет документов.")
+        await message.reply_text("📚 В библиотеке пока нет документов.")
         return
 
-    await send_long(update.message, format_catalog(documents, exact, possible))
+    await send_long(message, format_catalog(documents, exact, possible))
+
+
+# --- визуальный каталог: список по 10 книг и карточка с первой страницей PDF ---
+
+BOOKS_PER_PAGE = 10
+
+
+def book_title(document):
+    title = document["meta_title"] or library_catalog.UNDEFINED_TITLE
+    if document["meta_source"] == "manual":
+        title += " ✍️"
+    return title
+
+
+def book_status(document):
+    icon, status = STATUS_LABELS.get(document["status"], ("•", document["status"]))
+    if document["status"] in ("processing", "error"):
+        status += f" (до стр. {document['last_page']})"
+    return icon, status
+
+
+def books_list_view(page):
+    """(текст, клавиатура) одной страницы каталога. Читает только 10 строк базы."""
+    total = library_catalog.count_books()
+    if total == 0:
+        return "📚 В библиотеке пока нет книг.", None
+    pages = (total + BOOKS_PER_PAGE - 1) // BOOKS_PER_PAGE
+    page = min(max(0, page), pages - 1)
+    documents = library_catalog.books_page(page, BOOKS_PER_PAGE)
+    summary = library_catalog.catalog_summary()
+    lines = [
+        f"📚 КАТАЛОГ БИБЛИОТЕКИ · стр. {page + 1} из {pages}",
+        f"Всего документов: {summary['documents']} · книг: {total}. "
+        "Нажми на книгу — покажу её карточку и первую страницу PDF.",
+        "",
+    ]
+    keyboard = []
+    for document in documents:
+        icon, status = book_status(document)
+        lines.append(f"{icon} {document['code']} · {book_title(document)}")
+        if document["meta_author"]:
+            lines.append(f"   автор: {document['meta_author']}")
+        details = [
+            f"язык: {OCR_LANGUAGES.get(document['language'] or '', document['language'] or '—')}",
+            f"страниц: {document['pages']}",
+            status,
+        ]
+        if document["empty_pages"]:
+            details.insert(2, f"пустых: {document['empty_pages']}")
+        lines.append("   " + " · ".join(details))
+        lines.append(f"   файл: {document['file_title']}")
+        label = f"{document['code']} · {document['meta_title'] or 'без названия'}"
+        keyboard.append([InlineKeyboardButton(
+            label[:60], callback_data=f"bk:d:{document['id']}:{page}:1:b"
+        )])
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton("◀ Предыдущая", callback_data=f"bk:p:{page - 1}:e"))
+    if page < pages - 1:
+        navigation.append(InlineKeyboardButton("Следующая ▶", callback_data=f"bk:p:{page + 1}:e"))
+    if navigation:
+        keyboard.append(navigation)
+    if summary["service"]:
+        lines += ["", f"Служебные записи (не книги): {summary['service']} — список: /books all"]
+    if summary["untitled"]:
+        lines += [
+            "",
+            f"❓ Без названия: {summary['untitled']}. Определить по тексту книги: "
+            "/fixmeta all · задать вручную: /settitle DOC-000001 Название | Автор",
+        ]
+    lines += ["", "Весь список одним текстом и дубликаты: /books all · /dupes · проверка PDF: /bookcheck"]
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+def book_card_text(document, info, pdf_page, check, problem=None):
+    icon, status = book_status(document)
+    lines = [f"📗 {document['code']}" + ("" if problem else f" · стр. {pdf_page} PDF"),
+             f"Название: {book_title(document)}"]
+    if document["meta_author"]:
+        lines.append(f"Автор: {document['meta_author']}")
+    lines.append(f"Страниц (OCR): {document['pages']} · OCR: {icon} {status}")
+    lines.append(f"Файл: {document['file_title']}")
+    if problem:
+        lines += ["", f"⚠️ Миниатюра недоступна: {problem}. Каталог и OCR не затронуты."]
+        return "\n".join(lines)
+
+    page_info = (info or {}).get("pages", {}).get(str(pdf_page)) or {}
+    if check:
+        lines.append(f"Страниц в PDF: {info.get('pdf_pages', '?')}")
+        text_lines, source = page_info.get("lines") or [], "текстовый слой PDF"
+        if not text_lines:
+            text_lines = book_thumbnails.first_lines(get_page_text(document["id"], pdf_page))
+            source = "OCR библиотеки"
+        if text_lines:
+            lines.append(f"Текст стр. {pdf_page} ({source}):")
+            lines += [f"  «{line[:90]}»" for line in text_lines[:5]]
+        else:
+            lines.append(f"Текст стр. {pdf_page}: нет (скан без текста или иллюстрация)")
+        if document["meta_title"]:
+            texts = []
+            for number in (1, 2, 3):
+                texts += (info.get("pages", {}).get(str(number)) or {}).get("lines") or []
+                texts.append(get_page_text(document["id"], number))
+            if book_thumbnails.title_found(document["meta_title"], *texts) is False:
+                lines += [
+                    "",
+                    "⚠️ Название из каталога не найдено в тексте первых страниц — сверь с обложкой.",
+                    f"Исправить вручную: /settitle {document['code']} Название | Автор",
+                ]
+    if page_info.get("blank"):
+        lines.append(f"ℹ️ Стр. {pdf_page} пустая — открой следующую кнопкой ниже.")
+    elif pdf_page == 1 and not page_info.get("lines"):
+        lines.append("ℹ️ На стр. 1 нет текстового слоя (обложка-иллюстрация или скан) — можно открыть стр. 2.")
+    return "\n".join(lines)
+
+
+def book_card_keyboard(document, info, pdf_page, list_page, mode):
+    doc_id = document["id"]
+    rows = []
+    available = min(book_thumbnails.PREVIEW_PAGES, (info or {}).get("pdf_pages") or 0)
+    page_buttons = [
+        InlineKeyboardButton(f"📄 Стр. {n}", callback_data=f"bk:d:{doc_id}:{list_page}:{n}:{mode}")
+        for n in range(1, available + 1) if n != pdf_page
+    ]
+    if page_buttons:
+        rows.append(page_buttons)
+    previous, following, _ = library_catalog.book_neighbors(doc_id)
+    navigation = []
+    if previous:
+        navigation.append(InlineKeyboardButton(
+            "◀ Предыдущая", callback_data=f"bk:d:{previous}:{list_page}:1:{mode}"))
+    if following:
+        navigation.append(InlineKeyboardButton(
+            "Следующая ▶", callback_data=f"bk:d:{following}:{list_page}:1:{mode}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data=f"bk:p:{list_page}:n")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_book_card(message, document_id, list_page=None, pdf_page=1, mode="b"):
+    document = await asyncio.to_thread(library_catalog.book_by_id, document_id)
+    if document is None:
+        await message.reply_text("Документ не найден в каталоге. 🔎")
+        return
+    if list_page is None:
+        _, _, position = await asyncio.to_thread(library_catalog.book_neighbors, document_id)
+        list_page = position // BOOKS_PER_PAGE
+
+    code, key = document["code"], document["storage_key"]
+    if await asyncio.to_thread(book_thumbnails.load_info, code, key) is None:
+        await message.reply_text(
+            f"⏳ Готовлю миниатюру {code} — PDF читается из хранилища один раз, "
+            "дальше карточка открывается из кеша."
+        )
+    try:
+        image, info, _ = await asyncio.to_thread(book_thumbnails.get_preview, code, key, pdf_page)
+    except book_thumbnails.PreviewUnavailable as error:
+        await message.reply_text(
+            book_card_text(document, None, pdf_page, mode == "c", problem=str(error)),
+            reply_markup=book_card_keyboard(document, None, pdf_page, list_page, mode),
+        )
+        return
+
+    text = await asyncio.to_thread(book_card_text, document, info, pdf_page, mode == "c")
+    keyboard = await asyncio.to_thread(book_card_keyboard, document, info, pdf_page, list_page, mode)
+    if image is None:
+        await message.reply_text(
+            text + f"\n\n⚠️ В PDF нет страницы {pdf_page} или её миниатюра недоступна.",
+            reply_markup=keyboard,
+        )
+        return
+    if len(text) <= 1000:  # подпись к фото в Telegram — до 1024 символов
+        await message.reply_photo(photo=image, caption=text, reply_markup=keyboard)
+    else:
+        await message.reply_photo(photo=image)
+        await message.reply_text(text[:3900], reply_markup=keyboard)
+
+
+@admin_only
+async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [arg.strip() for arg in (context.args or []) if arg.strip()]
+    if args and args[0].lower() in ("all", "list", "все", "весь"):
+        await send_full_catalog(update.message)
+        return
+    if args and args[0].upper().startswith("DOC-"):
+        document = await asyncio.to_thread(library_catalog.book_by_code, args[0])
+        if document is None:
+            await update.message.reply_text(f"Документ {args[0].upper()} не найден. 🔎")
+            return
+        await send_book_card(update.message, document["id"])
+        return
+    page = int(args[0]) - 1 if args and args[0].isdigit() else 0
+    try:
+        text, keyboard = await asyncio.to_thread(books_list_view, page)
+    except Exception as error:
+        print(f"catalog failed: {type(error).__name__}: {error}")
+        await update.message.reply_text("❌ Не получилось прочитать каталог.")
+        return
+    await update.message.reply_text(text, reply_markup=keyboard)
+
+
+@admin_only
+async def bookcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка по реальному PDF из R2 — по одной книге, с кнопками навигации."""
+    args = [arg.strip() for arg in (context.args or []) if arg.strip()]
+    if args:
+        document = await asyncio.to_thread(library_catalog.book_by_code, args[0])
+    else:
+        first = await asyncio.to_thread(library_catalog.books_page, 0, 1)
+        document = first[0] if first else None
+    if document is None:
+        await update.message.reply_text(
+            "Документ не найден. 🔎" if args else "📚 В библиотеке пока нет книг."
+        )
+        return
+    await update.message.reply_text(
+        "🔍 ПРОВЕРКА КНИГ ПО PDF\n"
+        "Показываю по одной книге: первая страница настоящего PDF из хранилища, "
+        "её текст, число страниц PDF и статус OCR. Дальше — кнопка «Следующая ▶».\n"
+        "Ничего не переименовывается автоматически: исправить название — /settitle."
+    )
+    await send_book_card(update.message, document["id"], mode="c")
+
+
+async def books_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🔒 Каталог доступен только администратору.")
+        return
+    parts = query.data.split(":")
+    try:
+        if parts[1] == "p":
+            text, keyboard = await asyncio.to_thread(books_list_view, int(parts[2]))
+            if len(parts) > 3 and parts[3] == "e":
+                try:  # листаем список в том же сообщении
+                    await query.message.edit_text(text, reply_markup=keyboard)
+                    return
+                except Exception as error:
+                    print(f"catalog edit failed: {type(error).__name__}")
+            await query.message.reply_text(text, reply_markup=keyboard)
+        elif parts[1] == "d":
+            doc_id, list_page, pdf_page = int(parts[2]), int(parts[3]), int(parts[4])
+            mode = parts[5] if len(parts) > 5 and parts[5] in ("b", "c") else "b"
+            if not 1 <= pdf_page <= book_thumbnails.PREVIEW_PAGES:
+                pdf_page = 1
+            await send_book_card(query.message, doc_id, list_page, pdf_page, mode)
+    except (IndexError, ValueError):
+        await query.message.reply_text("Кнопка устарела — открой каталог заново: /books")
 
 
 def format_detected(code, detected, saved, manual):
@@ -3501,6 +3752,7 @@ def text_commands():
     return {
         "start": start,
         "books": books_command,
+        "bookcheck": bookcheck_command,
         "fixmeta": fixmeta_command,
         "settitle": settitle_command,
         "dupes": dupes_command,
@@ -3536,7 +3788,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -3578,6 +3830,8 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CommandHandler("reocr", reocr_command))
     app.add_handler(CommandHandler("books", books_command))
+    app.add_handler(CommandHandler("bookcheck", bookcheck_command))
+    app.add_handler(CallbackQueryHandler(books_callback, pattern=r"^bk:"))
     app.add_handler(CommandHandler("fixmeta", fixmeta_command))
     app.add_handler(CommandHandler("settitle", settitle_command))
     app.add_handler(CommandHandler("dupes", dupes_command))
