@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import time
 
 import library_search
 from functools import wraps
@@ -78,6 +79,11 @@ ANKETA_KEYS = [
     "item_id",
     "last_media_group",
     "album_notice",
+    "edit_code",
+    "edit_field",
+    "edit_kind",
+    "edit_started",
+    "edit_photo_count",
 ]
 
 
@@ -123,6 +129,8 @@ def init_db():
         ("details_photo", "TEXT"),
         ("owner_user_id", "INTEGER"),
         ("mark_text", "TEXT"),
+        ("notes", "TEXT"),
+        ("updated_at", "TEXT"),
     ]
 
     existing_columns = {
@@ -134,6 +142,19 @@ def init_db():
             conn.execute(
                 f"ALTER TABLE items ADD COLUMN {column_name} {column_type}"
             )
+    # Дополнительные фото к карточке (добавляются при редактировании).
+    # Основные фото анкеты остаются в items и не перезаписываются.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS item_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_code TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS books (
@@ -418,6 +439,151 @@ def delete_item(item_code, user_id):
         conn.close()
 
 
+# Поля карточки, которые владелица может менять:
+# поле → (название, подсказка, максимальная длина).
+EDITABLE_FIELDS = {
+    "notes": (
+        "📝 Описание",
+        "Опиши украшение своими словами: что это, как выглядит, "
+        "что уже удалось выяснить.",
+        3000,
+    ),
+    "mark_text": (
+        "🔖 Надпись на клейме",
+        "Перепиши, что написано на клейме: буквы, цифры, значки. "
+        "Например: TRIFARI © PAT. PEND.",
+        200,
+    ),
+    "measurements": (
+        "📏 Размеры",
+        "Напиши размеры, например: 52 × 38 мм.",
+        200,
+    ),
+    "weight": (
+        "⚖️ Вес",
+        "Напиши вес, например: 24.6 г.",
+        100,
+    ),
+    "provenance": (
+        "📍 Происхождение",
+        "Где ты нашла или купила украшение? Город, страна, рынок, магазин.",
+        500,
+    ),
+    "seller_story": (
+        "💬 История продавца",
+        "Что рассказывал продавец об этом украшении?",
+        1500,
+    ),
+}
+
+PHOTO_KINDS = {
+    "extra": "📸 Добавить фото",
+    "mark": "🔖 Фото клейма",
+}
+
+EDIT_TIMEOUT_SECONDS = 30 * 60
+
+
+def owns_item(item_code, user_id):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT 1 FROM items
+            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            """,
+            (item_code, user_id),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_item_field(item_code, user_id, field):
+    if field not in EDITABLE_FIELDS:
+        raise ValueError(f"Поле нельзя редактировать: {field}")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT {field} FROM items
+            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            """,
+            (item_code, user_id),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def update_item_field(item_code, user_id, field, value, append=False):
+    """Меняет одно поле своей карточки. Остальные поля не трогаются.
+    append=True дописывает текст к существующему. Возвращает True,
+    если карточка найдена и обновлена."""
+    if field not in EDITABLE_FIELDS:
+        raise ValueError(f"Поле нельзя редактировать: {field}")
+    if append:
+        new_value = (
+            f"CASE WHEN COALESCE({field}, '') = '' THEN ? "
+            f"ELSE {field} || char(10) || char(10) || ? END"
+        )
+        params = (value, value, item_code, user_id)
+    else:
+        new_value = "?"
+        params = (value, item_code, user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            f"""
+            UPDATE items
+            SET {field} = {new_value}, updated_at = datetime('now')
+            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            """,
+            params,
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def add_item_photo(item_code, user_id, kind, file_id):
+    """Добавляет фото к своей карточке. Старые фото не заменяются."""
+    if kind not in PHOTO_KINDS:
+        raise ValueError(f"Неизвестный тип фото: {kind}")
+    if not owns_item(item_code, user_id):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO item_photos (item_code, kind, file_id) VALUES (?, ?, ?)",
+            (item_code, kind, file_id),
+        )
+        conn.execute(
+            "UPDATE items SET updated_at = datetime('now') WHERE item_code = ?",
+            (item_code,),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_item_photos(item_code):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return conn.execute(
+            """
+            SELECT kind, file_id FROM item_photos
+            WHERE item_code = ?
+            ORDER BY CASE kind WHEN 'mark' THEN 0 ELSE 1 END, id
+            """,
+            (item_code,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def get_items(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -445,7 +611,7 @@ def get_item(item_code, user_id):
         f"""
         SELECT item_code, measurements, weight, provenance,
                seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo,
-               mark_text
+               mark_text, notes
         FROM items
         WHERE item_code = ?
           AND {OWNER_FILTER}
@@ -470,10 +636,14 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     item_code = query.data.split(":", 1)[1]
-    item = get_item(item_code, update.effective_user.id)
+    await show_item_card(query.message, item_code, update.effective_user.id)
+
+
+async def show_item_card(message, item_code, user_id):
+    item = get_item(item_code, user_id)
 
     if not item:
-        await query.message.reply_text(
+        await message.reply_text(
             "Не смогла найти эту карточку в шкатулке. 🔎"
         )
         return
@@ -489,14 +659,21 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_photo,
         mark_photo,
         details_photo,
-        mark_text
+        mark_text,
+        notes,
     ) = item
-    
+
     if front_photo:
-        await query.message.reply_photo(photo=front_photo)
-        
+        await message.reply_photo(photo=front_photo)
+
     if back_photo:
-        await query.message.reply_photo(photo=back_photo)
+        await message.reply_photo(photo=back_photo)
+
+    extra_count = len(get_item_photos(item_code))
+    notes_block = f"─── ОПИСАНИЕ ───\n{notes}\n\n" if notes else ""
+    extra_line = (
+        f"📸 Дополнительных фото: {extra_count}\n" if extra_count else ""
+    )
 
     card = (
         "✦ OH MY GOD VINTAGE ARCHIVE ✦\n\n"
@@ -506,7 +683,9 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📏 Размер: {measurements}\n"
         f"⚖️ Вес: {weight}\n"
         f"📍 Происхождение: {provenance}\n"
-        f"🔖 Надпись на клейме: {mark_text_label(mark_text, mark_photo)}\n\n"
+        f"🔖 Надпись на клейме: {mark_text_label(mark_text, mark_photo)}\n"
+        f"{extra_line}\n"
+        f"{notes_block}"
         "─── АТРИБУЦИЯ ───\n"
         f"◇ Статус: {attribution_status}\n\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
@@ -518,15 +697,21 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"details:{item_code}"
         )],
         [InlineKeyboardButton(
+            "✏️ Редактировать",
+            callback_data=f"edit:{item_code}"
+        )],
+        [InlineKeyboardButton(
             "🗑 Удалить карточку",
             callback_data=f"del:{item_code}"
         )],
     ])
-    
-    await query.message.reply_text(
-        card,
+
+    await message.reply_text(
+        card[:4000],
         reply_markup=details_keyboard
     )
+
+
 async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -572,6 +757,231 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text, reply_markup=main_keyboard())
 
 
+def edit_menu_keyboard(item_code):
+    def field_button(field):
+        return InlineKeyboardButton(
+            EDITABLE_FIELDS[field][0], callback_data=f"ef:{item_code}:{field}"
+        )
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(PHOTO_KINDS["extra"], callback_data=f"ep:{item_code}:extra"),
+            InlineKeyboardButton(PHOTO_KINDS["mark"], callback_data=f"ep:{item_code}:mark"),
+        ],
+        [field_button("notes"), field_button("mark_text")],
+        [field_button("measurements"), field_button("weight")],
+        [field_button("provenance"), field_button("seller_story")],
+        [InlineKeyboardButton("✅ Готово — показать карточку", callback_data=f"edone:{item_code}")],
+    ])
+
+
+async def send_edit_menu(message, item_code, intro=None):
+    await message.reply_text(
+        (intro + "\n\n" if intro else "")
+        + f"✏️ РЕДАКТИРОВАНИЕ {item_code}\n\n"
+        "Что меняем? Всё остальное в карточке останется как есть.",
+        reply_markup=edit_menu_keyboard(item_code),
+    )
+
+
+def clear_edit_state(context):
+    for key in ("edit_code", "edit_field", "edit_kind", "edit_started", "edit_photo_count"):
+        context.user_data.pop(key, None)
+    if context.user_data.get("mode") in ("edit", "edit_photo"):
+        context.user_data["mode"] = None
+
+
+def edit_state_fresh(context):
+    started = context.user_data.get("edit_started")
+    return started is not None and time.time() - started < EDIT_TIMEOUT_SECONDS
+
+
+async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    action, item_code = parts[0], parts[1]
+    arg = parts[2] if len(parts) > 2 else None
+    user_id = update.effective_user.id
+
+    if not owns_item(item_code, user_id):
+        clear_edit_state(context)
+        await query.message.reply_text(
+            "Эту карточку редактировать нельзя — она удалена или не твоя. 🔎",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    if action == "edit":
+        reset_anketa(context)
+        await send_edit_menu(query.message, item_code)
+        return
+
+    if action == "edone":
+        reset_anketa(context)
+        await show_item_card(query.message, item_code, user_id)
+        return
+
+    if action == "ef":
+        field = arg[:-4] if arg and arg.endswith("_add") else arg
+        if field not in EDITABLE_FIELDS:
+            return
+        append = arg.endswith("_add")
+        reset_anketa(context)
+        context.user_data.update({
+            "mode": "edit",
+            "edit_code": item_code,
+            "edit_field": field,
+            "edit_kind": "append" if append else "replace",
+            "edit_started": time.time(),
+        })
+        label, hint, _ = EDITABLE_FIELDS[field]
+        current = get_item_field(item_code, user_id, field)
+        current_text = current if current else "пока не указано"
+        how = (
+            "Пришли текст — я допишу его в конец описания."
+            if append else
+            "Пришли новый текст — он заменит текущий."
+        )
+        keyboard = None
+        if field == "notes" and not append and current:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "➕ Лучше дописать к описанию",
+                    callback_data=f"ef:{item_code}:notes_add",
+                )
+            ]])
+        await query.message.reply_text(
+            f"{label} — {item_code}\n\n"
+            f"Сейчас:\n{current_text}\n\n"
+            f"{hint}\n{how}\n\n"
+            "Передумала — напиши «отмена».",
+            reply_markup=keyboard,
+        )
+        return
+
+    if action == "ep" and arg in PHOTO_KINDS:
+        reset_anketa(context)
+        context.user_data.update({
+            "mode": "edit_photo",
+            "edit_code": item_code,
+            "edit_field": arg,
+            "edit_started": time.time(),
+            "edit_photo_count": 0,
+        })
+        what = (
+            "фото клейма крупным планом" if arg == "mark"
+            else "новые фото украшения (можно сразу несколько)"
+        )
+        await query.message.reply_text(
+            f"📸 Пришли {what}.\n\n"
+            "Старые фото карточки останутся на месте — новые добавятся к ним.\n"
+            "Когда закончишь, нажми «✅ Готово».",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Готово", callback_data=f"edit:{item_code}")
+            ]]),
+        )
+        return
+
+
+async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Текст, присланный в режиме редактирования поля."""
+    data = context.user_data
+    item_code = data.get("edit_code")
+    field = data.get("edit_field")
+    user_id = update.effective_user.id
+
+    if data.get("mode") == "edit_photo":
+        await update.message.reply_text(
+            "📸 Сейчас жду фото. Когда закончишь — нажми «✅ Готово» "
+            "или напиши «отмена».",
+        )
+        return
+
+    if field not in EDITABLE_FIELDS:
+        clear_edit_state(context)
+        return
+
+    label, _, max_length = EDITABLE_FIELDS[field]
+
+    if len(text) > max_length:
+        await update.message.reply_text(
+            f"Слишком длинно для поля «{label}»: {len(text)} символов, "
+            f"можно до {max_length}. Сократи, пожалуйста, и пришли ещё раз."
+        )
+        return
+
+    append = data.get("edit_kind") == "append"
+    try:
+        saved = update_item_field(item_code, user_id, field, text, append=append)
+    except Exception as error:
+        print(f"update_item_field failed: {type(error).__name__}: {error}")
+        await update.message.reply_text(
+            "😔 Не получилось сохранить. Попробуй чуть позже — "
+            "карточка не изменилась.",
+            reply_markup=main_keyboard(),
+        )
+        clear_edit_state(context)
+        return
+
+    clear_edit_state(context)
+    if not saved:
+        await update.message.reply_text(
+            "Эту карточку редактировать нельзя — она удалена или не твоя. 🔎",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    action_word = "Дописала" if append else "Сохранила"
+    await send_edit_menu(
+        update.message,
+        item_code,
+        intro=f"✅ {action_word}: {label}.",
+    )
+
+
+async def handle_edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data
+    message = update.message
+    item_code = data.get("edit_code")
+    kind = data.get("edit_field")
+
+    try:
+        saved = add_item_photo(
+            item_code, update.effective_user.id, kind, message.photo[-1].file_id
+        )
+    except Exception as error:
+        print(f"add_item_photo failed: {type(error).__name__}: {error}")
+        await message.reply_text("😔 Не получилось сохранить фото. Попробуй ещё раз.")
+        return
+
+    if not saved:
+        clear_edit_state(context)
+        await message.reply_text(
+            "Эту карточку редактировать нельзя — она удалена или не твоя. 🔎",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    data["edit_photo_count"] = data.get("edit_photo_count", 0) + 1
+    data["edit_started"] = time.time()
+
+    # Из альбома отвечаем один раз, а не на каждое фото.
+    group_id = message.media_group_id
+    if group_id and group_id == data.get("last_media_group"):
+        return
+    data["last_media_group"] = group_id
+
+    await message.reply_text(
+        "📸 Фото добавлено в карточку. Можно прислать ещё.\n"
+        "Когда закончишь, нажми «✅ Готово».",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Готово", callback_data=f"edit:{item_code}")
+        ]]),
+    )
+
+
 async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -591,6 +1001,14 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if details_photo:
         await query.message.reply_photo(photo=details_photo)
+
+    for kind, file_id in get_item_photos(item_code)[:20]:
+        await query.message.reply_photo(photo=file_id)
+
+    if not (mark_photo or details_photo or get_item_photos(item_code)):
+        await query.message.reply_text("Фото клейма и деталей пока нет. 📸")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start выводит из незаконченной анкеты.
     reset_anketa(context)
@@ -657,6 +1075,19 @@ TEXT_STEP_HINTS = {
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     step = context.user_data.get("step")
+
+    if context.user_data.get("mode") in ("edit", "edit_photo"):
+        if not edit_state_fresh(context):
+            clear_edit_state(context)
+        elif context.user_data.get("mode") == "edit_photo":
+            await handle_edit_photo(update, context)
+            return
+        else:
+            await message.reply_text(
+                "✍️ Сейчас жду текст, а не фото. "
+                "Передумала — напиши «отмена»."
+            )
+            return
 
     if context.user_data.get("mode") != "identify" or (
         step not in PHOTO_STEP_HINTS and step not in TEXT_STEP_HINTS
@@ -866,6 +1297,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_anketa(context)
         await handle_menu_button(update, context, text)
         return
+
+    if mode in ("edit", "edit_photo"):
+        if not edit_state_fresh(context):
+            clear_edit_state(context)
+            mode = None
+        elif text.lower() in ("отмена", "отменить", "cancel"):
+            item_code = context.user_data.get("edit_code")
+            clear_edit_state(context)
+            await send_edit_menu(
+                update.message, item_code, intro="Хорошо, ничего не меняю. 🙂"
+            )
+            return
+        else:
+            await handle_edit_text(update, context, text)
+            return
 
     if mode == "identify" and step == "mark_text":
         unreadable = {"не читается", "нечитаемо", "не разобрать", "-", "—"}
@@ -1744,6 +2190,7 @@ def main():
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
+    app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(
         MessageHandler(
             filters.Document.ALL,
