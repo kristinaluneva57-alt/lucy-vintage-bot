@@ -210,7 +210,7 @@ class SarahCoventryLibraryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ошибка OpenAI", report)
         self.assertIn("Бесплатная попытка не списана", report)
         self.assertIn("Серебристое Y-образное колье", report)          # описание сохранено
-        self.assertIn("«SARAH COVENTRY»", report)
+        self.assertIn("Клеймо, указанное владелицей: SARAH COVENTRY", report)
         self.assertIn("с фото НЕ сравнивались", report)
         self.assertIn("DOC-000007 · Sarah Coventry Jewelry · PDF-стр.", report)
         self.assertNotIn("Производитель: Sarah", report)

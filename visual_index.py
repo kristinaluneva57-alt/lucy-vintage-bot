@@ -413,7 +413,8 @@ def documents_for_brands(conn, brands):
     return found
 
 
-def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_excluded=False):
+def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_excluded=False,
+                      priority_brands=()):
     """Дешёвый (без ИИ) поиск страниц-кандидатов по всей библиотеке.
 
     1. Книги, в названии которых есть марка с клейма, участвуют целиком:
@@ -423,11 +424,17 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_e
     3. Служебные страницы (оглавление, указатель, выходные данные,
        библиография) исключаются.
 
+    priority_brands — марки с клейма, указанного владелицей: страницы книг
+    об этой марке и страницы, где марка напечатана, идут раньше всех
+    остальных, как бы много общих слов («necklace», «red stones») ни
+    совпало на чужих страницах.
+
     Возвращает список dict; with_excluded=True — ещё и (номер страницы,
     причина) исключённых служебных страниц, для диагностики.
     """
     terms = [t for t in dict.fromkeys(t.strip().lower() for t in terms if t and t.strip())]
-    brands = [b.lower() for b in brands if b]
+    priority_brands = [b.lower() for b in priority_brands if b]
+    brands = list(dict.fromkeys(priority_brands + [b.lower() for b in brands if b]))
     excluded = []
     if not terms and not brands:
         return ([], excluded) if with_excluded else []
@@ -499,6 +506,11 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_e
             matched_terms = [t for t in terms if t in lower]
             brand_on_page = any(b in page_brands or b in lower for b in brands)
             in_brand_book = doc in brand_docs
+            hooks = bool(matched_terms or captions or ad >= 0.3 or illustration >= 0.5)
+            priority = bool(priority_brands) and (
+                any(b in page_brands or b in lower for b in priority_brands)
+                or (brand_docs.get(doc) in priority_brands and hooks)
+            )
 
             score = (
                 min(text_score, 8.0)
@@ -517,6 +529,8 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_e
                 score -= 2.0
 
             why = []
+            if priority:
+                why.append("клеймо владелицы")
             if in_brand_book:
                 why.append(f"книга о марке {brand_docs[doc].title()}")
             if brand_on_page:
@@ -543,11 +557,12 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_e
                 "illustration_score": illustration,
                 "text": text,
                 "why": why,
+                "priority": priority,
             })
     finally:
         conn.close()
 
-    results.sort(key=lambda r: (-r["score"], r["document_id"], r["pdf_page"]))
+    results.sort(key=lambda r: (not r["priority"], -r["score"], r["document_id"], r["pdf_page"]))
     picked, per_doc = [], {}
     for result in results:
         count = per_doc.get(result["document_id"], 0)

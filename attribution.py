@@ -10,7 +10,11 @@
 2. Права: режим LUCY_VISUAL_MODE, 3 бесплатные ИИ-атрибуции в месяц
    (администратор без личного лимита), бюджет в $ на день и месяц —
    проверяется ДО каждого платного вызова (visual_ai.call_json).
-3. ИИ ① описывает украшение по фото и читает клеймо → поисковые термины.
+3. ИИ ① описывает украшение по фото → поисковые термины. Клеймо, которое
+   владелица вписала в карточку (mark_text), — исходный факт: модель его
+   не перечитывает, а поиск, выбор книги по марке, сравнение и отчёт
+   опираются на него. Чтение клейма ИИ с фото используется для поиска
+   только если в карточке клейма нет — и помечается как предположение.
 4. Бесплатный поиск кандидатов по индексу всей библиотеки (visual_index).
 5. ИИ ② сравнивает фото с не более чем MAX_COMPARE_PAGES изображениями
    страниц: точное совпадение / вероятное / только стиль / нет.
@@ -411,6 +415,40 @@ def decide_mode(db_path, user_id, is_admin):
     return _mode_for(paid_this_month(db_path, user_id), is_admin)
 
 
+def owner_mark(card):
+    """Клеймо, указанное владелицей в карточке, или None."""
+    value = re.sub(r"\s+", " ", (card or {}).get("mark_text") or "").strip()
+    if not value or value.lower() in ("не читается", "нет", "клейма нет", "-", "—"):
+        return None
+    return value[:200]
+
+
+def _mark_key(text):
+    return re.sub(r"[^0-9a-zа-яё]+", "", (text or "").lower())
+
+
+def same_mark(seen, recorded):
+    """Совпадает ли прочитанное с фото с записанным клеймом (без учёта
+    регистра, пробелов и знаков; частичное чтение тоже считается)."""
+    a, b = _mark_key(seen), _mark_key(recorded)
+    if not a or not b:
+        return False
+    if min(len(a), len(b)) < 4:  # «©», «R», «SC» — только точное совпадение
+        return a == b
+    return a in b or b in a
+
+
+def owner_mark_note(mark):
+    """Текст для модели: клеймо — данность, повторно не распознавать."""
+    return (
+        f"OWNER-RECORDED MARK (a fact entered by the owner, already verified by her): «{mark}». "
+        "Do NOT re-read or re-interpret the mark and do not use it as your own reading; "
+        "do not put brand names into search_terms. Spend your attention on construction, shape, "
+        "settings, stones, metal, findings and clasp. Leave \"marks\" empty, unless the characters "
+        "visible in the photos clearly differ from the owner's record — then list what you see."
+    )
+
+
 def card_terms(card):
     """Поисковые термины из карточки: клеймо и описание (через словарь)."""
     terms, brands = [], []
@@ -432,7 +470,13 @@ def run(db_path, user_id, item_code, photos, card, is_admin=False):
     card — поля карточки: mark_text, notes.
     """
     version = library_version(db_path)
-    digest = photos_hash(photos, version)
+    # Кэш учитывает и данные карточки: если владелица вписала или исправила
+    # клеймо, старый результат (без него) повторно не выдаётся.
+    card_state = json.dumps(
+        {"mark": owner_mark(card), "notes": (card or {}).get("notes") or ""},
+        ensure_ascii=False, sort_keys=True,
+    )
+    digest = photos_hash(photos, version + "\n" + card_state)
 
     # Готовый результат по тем же фото — бесплатно, попытку не списывает.
     allowed = visual_ai.mode() == "all" or (visual_ai.mode() == "admin" and is_admin)
@@ -479,10 +523,15 @@ def run(db_path, user_id, item_code, photos, card, is_admin=False):
 
 def _run_free(db_path, card, note=None):
     terms, brands = card_terms(card)
-    candidates = visual_index.search_candidates(db_path, terms, brands, limit=3) if (terms or brands) else []
+    mark = owner_mark(card)
+    priority = visual_index.find_brands(mark) if mark else []
+    candidates = visual_index.search_candidates(
+        db_path, terms, brands, limit=3, priority_brands=priority,
+    ) if (terms or brands) else []
     return {
         "mode": "free",
         "note": note,
+        "owner_mark": mark,
         "terms": terms[:12],
         "evidence": [
             {
@@ -502,42 +551,72 @@ def _run_free(db_path, card, note=None):
 
 def _run_ai(db_path, attribution_id, user_id, photos, card):
     calls = dict(db_path=db_path, attribution_id=attribution_id, user_id=user_id)
-    order = {"mark": 0, "front": 1, "back": 2}
+    mark = owner_mark(card)
+    owner_brands = visual_index.find_brands(mark) if mark else []
+    if mark:
+        # Клеймо уже известно — фото клейма не нужно модели в первую очередь:
+        # лицо, оборот и детали важнее для описания конструкции.
+        order = {"front": 0, "back": 1, "details": 2, "extra": 3, "mark": 4}
+    else:
+        order = {"mark": 0, "front": 1, "back": 2}
     chosen = sorted(photos, key=lambda p: order.get(p[0], 5))[:MAX_USER_PHOTOS]
     small = [(label, page_images.shrink_jpeg(data)) for label, data in chosen]
 
-    # ① описание и клеймо
-    content = [{"type": "text", "text": "Photos of one piece: " + ", ".join(l for l, _ in small)}]
+    # ① описание по фото
+    intro = "Photos of one piece: " + ", ".join(l for l, _ in small)
+    if mark:
+        intro += "\n" + owner_mark_note(mark)
+    content = [{"type": "text", "text": intro}]
     content += [visual_ai.image_part(data) for _, data in small]
     described = visual_ai.call_json(
         kind="describe", system=DESCRIBE_SYSTEM, content=content,
         images=len(small), max_tokens=700, **calls,
     )
 
-    marks = [m for m in described.get("marks") or [] if isinstance(m, dict)]
-    legible_marks = [m.get("text", "") for m in marks if m.get("legible") and m.get("text")]
-    if card.get("mark_text") and card["mark_text"] != "не читается":
-        legible_marks.append(card["mark_text"])
-    brands = []
-    for text in legible_marks:
-        brands += visual_index.find_brands(text)
-    brands = list(dict.fromkeys(brands))
+    marks = [m for m in described.get("marks") or [] if isinstance(m, dict) and m.get("text")]
+    photo_marks = [str(m["text"])[:120] for m in marks if m.get("legible")]
+    if mark:
+        # Клеймо владелицы — единственный источник марки. Чтение ИИ его не заменяет.
+        brands, brand_source = owner_brands, "owner" if owner_brands else None
+        mark_conflict = [text for text in (str(m["text"])[:120] for m in marks) if not same_mark(text, mark)]
+    else:
+        brands = []
+        for text in photo_marks:
+            brands += visual_index.find_brands(text)
+        brands = list(dict.fromkeys(brands))
+        brand_source = "photo" if brands else None
+        mark_conflict = []
 
-    terms = [t for t in described.get("search_terms") or [] if isinstance(t, str)]
-    extra_terms, extra_brands = card_terms(card)
-    terms = list(dict.fromkeys(terms + extra_terms))
-    brands = list(dict.fromkeys(brands + extra_brands))
+    ai_terms = [t for t in described.get("search_terms") or [] if isinstance(t, str)]
+    if mark:
+        # Ни марки, «додуманные» моделью, ни её собственное чтение клейма
+        # (например «Sakai Tamaru») не должны уводить поиск от клейма владелицы.
+        read_by_ai = [str(m["text"]) for m in marks]
+        ai_terms = [
+            t for t in ai_terms
+            if set(visual_index.find_brands(t)) <= set(owner_brands)
+            and not any(same_mark(t, text) for text in read_by_ai)
+        ]
+    card_terms_list, card_brands = card_terms(card)
+    # Сначала данные карточки (клеймо, описание владелицы), потом слова ИИ.
+    terms = list(dict.fromkeys(card_terms_list + ai_terms))
+    search_brands = list(dict.fromkeys(brands + card_brands))
 
-    # ② бесплатный поиск кандидатов
-    candidates = visual_index.search_candidates(db_path, terms, brands, limit=MAX_CANDIDATES)
+    # ② бесплатный поиск кандидатов: страницы о марке с клейма владелицы — первыми
+    candidates = visual_index.search_candidates(
+        db_path, terms, search_brands, limit=MAX_CANDIDATES, priority_brands=owner_brands,
+    )
     result = {
         "mode": "ai",
+        "owner_mark": mark,
         "description": {
             "type": described.get("type_ru"),
             "text": described.get("description_ru"),
             "marks": marks,
         },
+        "mark_conflict": mark_conflict,
         "brands_from_mark": brands,
+        "brand_source": brand_source,
         "terms": terms[:15],
         "candidates_found": len(candidates),
         "candidates": [
@@ -579,7 +658,14 @@ def _run_ai(db_path, attribution_id, user_id, photos, card):
         stop("не удалось получить изображения страниц для сравнения")
 
     # ③ сравнение с не более чем MAX_COMPARE_PAGES страницами
-    content = [{"type": "text", "text": "USER photos:"}]
+    user_intro = "USER photos:"
+    if mark:
+        user_intro = (
+            f"OWNER-RECORDED MARK on the USER piece: «{mark}» (a fact from the owner; a starting point "
+            "for research, not proof of the model). Judge the match ONLY by visual features. Do not "
+            "claim that a page shows this brand unless it is printed on the page.\nUSER photos:"
+        )
+    content = [{"type": "text", "text": user_intro}]
     content += [visual_ai.image_part(data) for _, data in small[:2]]
     for index, (candidate, image) in enumerate(pages, 1):
         excerpt = "; ".join(candidate["captions"][:4]) or candidate["text"][:400]
@@ -757,6 +843,46 @@ def source_line(evidence):
     return f"{evidence['document_code']} · {evidence['title']} · PDF-стр. {evidence['pdf_page']}"
 
 
+MARK_DISCLAIMER = (
+    "Клеймо — исходный факт для поиска; само по себе оно не доказывает "
+    "подлинность украшения и не определяет точную модель."
+)
+
+
+def owner_mark_lines(result):
+    mark = result.get("owner_mark")
+    if mark:
+        return [f"🔖 Клеймо, указанное владелицей: {mark}", MARK_DISCLAIMER]
+    return ["🔖 Клеймо в карточке не указано."]
+
+
+def photo_lines(result, label="📷 Что видно на фотографии"):
+    """Описание ИИ по фото. Чтение клейма с фото никогда не подменяет
+    клеймо владелицы: при расхождении — отдельная пометка."""
+    lines = []
+    description = result.get("description") or {}
+    if description.get("text"):
+        lines.append(f"{label}: {description['text']}")
+    marks = [m for m in description.get("marks") or [] if isinstance(m, dict) and m.get("text")]
+    if result.get("owner_mark"):
+        conflict = result.get("mark_conflict")
+        if conflict is None:  # старые результаты
+            conflict = [m["text"] for m in marks if not same_mark(m["text"], result["owner_mark"])]
+        if conflict:
+            lines.append(
+                "⚠️ Автоматическое чтение фотографии отличается от указанной надписи: "
+                + ", ".join(f"«{text}»" for text in conflict)
+                + ". Для поиска использовано клеймо из карточки."
+            )
+    elif marks:
+        lines.append(
+            "Надпись, которую ИИ прочитал на фото (предположение, не подтверждено): "
+            + ", ".join(f"«{m['text']}»" + ("" if m.get("legible") else " (нечётко)") for m in marks)
+            + ". Если она верна — впиши клеймо в карточку."
+        )
+    return lines
+
+
 def format_report(result):
     """Исследовательская карточка на русском. Всё неподтверждённое — отдельно."""
     lines = []
@@ -764,6 +890,8 @@ def format_report(result):
         lines.append("🔎 ПОИСК ПО КНИГАМ (без ИИ-сравнения)")
         if result.get("note"):
             lines.append(f"ℹ️ {result['note'][:1].upper() + result['note'][1:]}.")
+        if result.get("owner_mark"):
+            lines += ["", f"🔖 Клеймо, указанное владелицей: {result['owner_mark']} — поиск шёл в первую очередь по нему."]
         if not result.get("evidence"):
             lines += ["", "По надписи клейма и описанию карточки подходящих страниц не нашлось.",
                       "Добавь в карточку текст клейма и описание — по ним идёт поиск."]
@@ -782,28 +910,39 @@ def format_report(result):
     lines.append("🔬 ИССЛЕДОВАНИЕ ПО БИБЛИОТЕКЕ")
     if result.get("from_cache"):
         lines.append("(готовый результат по тем же фото — без новых расходов)")
-    description = result.get("description") or {}
-    if description.get("text"):
-        lines += ["", f"Что на фото: {description['text']}"]
-    marks = description.get("marks") or []
-    if marks:
-        shown = [f"«{m.get('text')}»" + ("" if m.get("legible") else " (нечётко)") for m in marks if m.get("text")]
-        if shown:
-            lines.append("Клеймо на фото: " + ", ".join(shown))
+    lines += [""] + owner_mark_lines(result)
+    photo = photo_lines(result)
+    if photo:
+        lines += [""] + photo
 
     best = best_evidence(result)
     unconfirmed = []
 
-    lines.append("")
+    lines += ["", "📖 Что подтверждено историческим источником:"]
     if result.get("candidates_found") == 0:
         lines.append("В библиотеке не нашлось страниц-кандидатов по признакам этого украшения.")
     elif not best:
-        lines.append("Точных или вероятных совпадений среди проверенных страниц нет.")
+        lines.append(
+            "Точных или вероятных совпадений среди проверенных страниц нет — "
+            "атрибуция не выдаётся."
+        )
+        if result.get("owner_mark") and any(
+            "клеймо владелицы" in (c.get("why") or []) for c in result.get("candidates") or []
+        ):
+            lines.append(f"Проверены страницы, связанные с клеймом «{result['owner_mark']}».")
 
     if best:
         manufacturer = None
-        if result.get("brands_from_mark"):
-            manufacturer = f"{result['brands_from_mark'][0].title()} (по клейму на украшении)"
+        source = result.get("brand_source") or ("photo" if result.get("brands_from_mark") else None)
+        brand = (result.get("brands_from_mark") or [None])[0]
+        on_page = bool(brand) and brand in [b.lower() for b in best.get("page_brands") or []]
+        if source == "owner":
+            manufacturer = f"{brand.title()} — по клейму, указанному владелицей"
+            if on_page:
+                manufacturer += f"; марка напечатана на странице-источнике [{best['n']}]"
+        elif source == "photo":
+            manufacturer = f"{brand.title()} — по надписи, прочитанной ИИ на фото (не подтверждено владелицей)"
+            unconfirmed.append("клеймо прочитано ИИ с фото, в карточке не указано")
         elif best.get("page_brands"):
             manufacturer = f"{best['page_brands'][0].title()} — упомянут на странице-источнике, клеймо не подтверждает"
             unconfirmed.append("производитель не подтверждён клеймом")
@@ -876,14 +1015,10 @@ def format_partial(result):
         f"⚠️ {reason[:1].upper() + reason[1:]}.",
         "Бесплатная попытка не списана.",
     ]
-    description = result.get("description") or {}
-    if description.get("text"):
-        lines += ["", f"Что на фото (описание ИИ): {description['text']}"]
-    marks = [m for m in description.get("marks") or [] if m.get("text")]
-    if marks:
-        lines.append("Клеймо на фото: " + ", ".join(
-            f"«{m['text']}»" + ("" if m.get("legible") else " (нечётко)") for m in marks
-        ))
+    lines += [""] + owner_mark_lines(result)
+    photo = photo_lines(result, label="📷 Что видно на фотографии (описание ИИ)")
+    if photo:
+        lines += [""] + photo
     evidence = result.get("evidence") or []
     if evidence:
         lines += [
@@ -948,7 +1083,9 @@ def summary_for_card(result):
     if not best:
         return None
     parts = []
-    if result.get("brands_from_mark"):
+    # В карточку — только марка с клейма владелицы; чтение ИИ с фото не записываем.
+    source = result.get("brand_source") or ("photo" if result.get("brands_from_mark") else None)
+    if result.get("brands_from_mark") and source == "owner":
         parts.append(result["brands_from_mark"][0].title())
     for key in ("set_name", "model_name"):
         value = best.get(key)
