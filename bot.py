@@ -1,6 +1,8 @@
 import os
 import asyncio
 import sqlite3
+
+import library_search
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
@@ -13,7 +15,6 @@ from knowledge_bridge import (
 )
 from fact_extractor import extract_page_facts
 from ai_fact_extractor import extract_ai_facts, save_ai_facts
-import library_search
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
