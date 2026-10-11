@@ -18,7 +18,12 @@ from flask import Flask, jsonify, request, render_template_string
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from library_importer import OCR_LANGUAGES, import_pdf_with_ocr, metadata_lines
+from library_importer import (
+    OCR_LANGUAGES,
+    diagnostic_lines,
+    import_pdf_with_ocr,
+    metadata_lines,
+)
 
 
 log = logging.getLogger(__name__)
@@ -168,7 +173,8 @@ button:disabled { opacity: .5; }
   <option value="rus">🇷🇺 Русский</option>
 </select>
 
-<input type="file" id="file" accept=".pdf,application/pdf">
+<input type="file" id="file" accept=".pdf,application/pdf" onchange="showChosen()">
+<p id="chosen"></p>
 <button id="send" onclick="uploadBook()">Загрузить книгу</button>
 <p id="status"></p>
 </div>
@@ -180,6 +186,16 @@ const button = document.getElementById("send");
 
 function status(text) {
   statusBox.textContent = text;
+}
+
+function describe(file) {
+  return "«" + file.name + "», " + (file.size / 1024 / 1024).toFixed(1) + " МБ";
+}
+
+function showChosen() {
+  const file = document.getElementById("file").files[0];
+  document.getElementById("chosen").textContent =
+    file ? "Выбран файл: " + describe(file) : "";
 }
 
 async function api(path, data) {
@@ -218,7 +234,7 @@ async function uploadBook() {
   button.disabled = true;
 
   try {
-    status("Подготавливаю загрузку...");
+    status("Подготавливаю загрузку: " + describe(file) + "...");
 
     
     const prepared = await api("/prepare", {
@@ -227,7 +243,7 @@ async function uploadBook() {
       language: document.getElementById("language").value
     });
 
-    status("Загружаю PDF напрямую в R2. Не закрывай страницу...");
+    status("Загружаю " + describe(file) + " напрямую в R2. Не закрывай страницу...");
 
     const uploaded = await fetch(prepared.upload_url, {
       method: "PUT",
@@ -249,8 +265,13 @@ async function uploadBook() {
 
     status(
       "✅ Книга передана Люсе!\\n" +
+      "Файл: " + describe(file) + "\\n" +
+      "Сессия: " + prepared.upload_id.slice(0, 8) + "\\n" +
       "Результат обработки придёт в Telegram."
     );
+    // Сбрасываем выбор, чтобы повторное нажатие не отправило тот же файл.
+    document.getElementById("file").value = "";
+    showChosen();
 
   } catch (error) {
     status("❌ " + error.message);
@@ -316,6 +337,7 @@ def prepare():
         sessions[upload_id] = {
             "key": key,
             "title": name[:-4][:200] or "Без названия",
+            "file_name": name[:200],
             "size": size,
              "language": language,
             "user_id": user_id,
@@ -329,29 +351,39 @@ def prepare():
     )
 
 
-def process_book(key, title, language):
+def book_report(result, title, language, file_name=None, upload_id=None):
+    created = result.get("created", True)
+    if created:
+        heading = "✅ КНИГА В БИБЛИОТЕКЕ"
+    else:
+        heading = (
+            "📚 ЭТОТ ФАЙЛ УЖЕ ЕСТЬ В БИБЛИОТЕКЕ (дубль не создан)\n"
+            f"Содержимое файла полностью совпадает с {result['document_code']}. "
+            "Если ты выбирала другую книгу — открой этот файл на устройстве: "
+            "внутри него та книга, что указана ниже."
+        )
+    text = (
+        f"{heading}\n\n"
+        f"📚 Файл: {title}\n"
+        f"Документ: {result['document_code']}\n"
+        + metadata_lines(result)
+        + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
+        f"Страниц: {result['total_pages']}\n"
+        f"Обработано: {result['completed_pages']}\n"
+        f"Статус: {result['status']}\n"
+        + diagnostic_lines(result, file_name=file_name, session_id=upload_id)
+    )
+    return text
+
+
+def process_book(key, title, language, file_name=None, upload_id=None):
     try:
         result = import_pdf_with_ocr(
             storage_key=key,
             title=title,
             language=language
         )
-
-        heading = (
-            "✅ КНИГА В БИБЛИОТЕКЕ"
-            if result.get("created", True)
-            else "📚 ЭТА КНИГА УЖЕ БЫЛА В БИБЛИОТЕКЕ (дубль не создан)"
-        )
-        notify_admin(
-            f"{heading}\n\n"
-            f"📚 Файл: {title}\n"
-            f"Документ: {result['document_code']}\n"
-            + metadata_lines(result)
-            + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
-            f"Страниц: {result['total_pages']}\n"
-            f"Обработано: {result['completed_pages']}\n"
-            f"Статус: {result['status']}"
-        )
+        notify_admin(book_report(result, title, language, file_name, upload_id))
 
     except Exception:
         log.exception("Large book import failed")
@@ -401,13 +433,18 @@ def complete():
         if info["ContentLength"] != session["size"]:
             raise ValueError("Размер файла не совпадает")
 
-        
+        print(
+            f"bigbook upload: session={upload_id[:8]} key={session['key']} "
+            f"declared={session['size']} r2={info['ContentLength']}"
+        )
         worker = threading.Thread(
             target=process_book,
             args=(
                 session["key"],
                 session["title"],
-                session["language"]
+                session["language"],
+                session.get("file_name"),
+                upload_id,
             ),
             daemon=True
         )

@@ -16,6 +16,7 @@ from telegram.ext import ContextTypes
 from library_db import get_connection
 from library_importer import (
     OCR_LANGUAGES,
+    diagnostic_lines,
     metadata_lines,
     calculate_checksum,
     import_pdf_with_ocr,
@@ -55,7 +56,7 @@ def find_duplicate(checksum):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT document_code, title
+            SELECT document_code, COALESCE(meta_title, title), meta_author
             FROM library_documents
             WHERE checksum = ?
             LIMIT 1
@@ -195,11 +196,16 @@ async def receive_book_pdf(
                 )
 
                 if duplicate:
+                    author = f"Автор: {duplicate[2]}\n" if duplicate[2] else ""
                     await message.reply_text(
-                        "📚 Эта книга уже есть "
-                        "в библиотеке.\n\n"
+                        "📚 Этот файл уже есть "
+                        "в библиотеке (совпадает SHA-256 — "
+                        "файл байт в байт тот же).\n\n"
+                        f"Документ: {duplicate[0]}\n"
                         f"Название: {duplicate[1]}\n"
-                        f"Документ: {duplicate[0]}"
+                        + author
+                        + f"Файл: {title}\n"
+                        f"SHA-256: {checksum}"
                     )
                     return
 
@@ -264,7 +270,8 @@ async def _import_and_report(message, storage_key, title, language):
             + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
             f"PDF-страниц: {result['total_pages']}\n"
             f"Обработано: {result['completed_pages']}\n"
-            f"Статус: {result['status']}"
+            f"Статус: {result['status']}\n"
+            + diagnostic_lines(result, file_name=f"{title}.pdf")
         )
     except Exception:
         logger.exception("PDF import failed")
