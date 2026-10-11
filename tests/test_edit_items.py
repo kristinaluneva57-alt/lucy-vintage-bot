@@ -243,25 +243,22 @@ class EditItemsTest(unittest.IsolatedAsyncioTestCase):
     # --- анкета не сломана ---
 
     async def test_new_anketa_still_creates_card(self):
+        # Быстрая анкета: лицо, оборот, клеймо — и карточку сразу можно дополнять.
         chat = FakeChat(bot, 7)
         await chat.press("box:add")
         await chat.photo("F")
         await chat.photo("B")
+        await chat.say("есть")
         await chat.photo("M")
-        await chat.say("CORO")
-        await chat.photo("D")
-        await chat.say("30 мм")
-        await chat.say("нет")
-        await chat.say("Флохмаркт")
-        replies = await chat.say("нет")
-        self.assertIn("КАРТОЧКА НАХОДКИ", texts(replies)[0])
+        replies = await chat.say("CORO")
+        self.assertIn("Я уже могу попробовать исследовать", texts(replies)[0])
         self.assertEqual(count_items(), 2)
         new_code = bot.get_items(7)[0][0]
         await chat.press(f"ef:{new_code}:notes")
         await chat.say("Моя первая брошь")
         self.assertEqual(item_row(new_code)["notes"], "Моя первая брошь")
         self.assertEqual(item_row(new_code)["mark_text"], "CORO")
-
+        self.assertEqual(item_row(new_code)["mark_photo"], "M")
 
 if __name__ == "__main__":
     unittest.main()

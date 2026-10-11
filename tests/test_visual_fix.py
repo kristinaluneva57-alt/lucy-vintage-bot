@@ -275,7 +275,7 @@ class SarahCoventryLibraryTest(unittest.IsolatedAsyncioTestCase):
         replies = await self.owner.press("item:OMG-000006")
         self.assertEqual(
             [d.split(":")[0] for d in buttons(replies)],
-            ["details", "vattr", "edit", "del"],
+            ["details", "vpre", "edit", "del"],
         )
 
 

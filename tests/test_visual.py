@@ -591,7 +591,8 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_card_has_research_button_and_owner_only(self):
         replies = await self.owner.press("item:OMG-000001")
-        self.assertIn("vattr:OMG-000001", buttons(replies))
+        # Кнопка карточки ведёт к подтверждению перед платным исследованием.
+        self.assertIn("vpre:OMG-000001", buttons(replies))
         intro, _ = await self.research(self.stranger, "OMG-000001")
         self.assertIn("только свою карточку", texts(intro)[0])
         self.assertEqual(FakeOpenAI.calls, [])
