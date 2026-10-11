@@ -15,6 +15,7 @@ from knowledge_bridge import (
 )
 from fact_extractor import extract_page_facts
 from ai_fact_extractor import extract_ai_facts, save_ai_facts
+import lucy_ai
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
 from library_importer import OCR_LANGUAGES, reocr_document, list_documents
@@ -501,6 +502,7 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start выводит из незаконченной анкеты.
     reset_anketa(context)
+    context.user_data.pop("ai_history", None)
 
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
@@ -509,10 +511,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "фото, клеймо, размеры и история каждого украшения в одной "
         "карточке. Карточки видишь только ты.\n"
         f"{BTN_LEARN} — короткие уроки для начинающих.\n"
-        f"{BTN_SEARCH} — поиск по книгам нашей библиотеки "
-        "(пока по-английски).\n\n"
-        "Отвечать на свободные вопросы я пока учусь — "
-        "скоро научусь. 🙂\n\n"
+        f"{BTN_SEARCH} — поиск по книгам нашей библиотеки.\n\n"
+        "💬 А ещё можно просто написать мне вопрос о винтажных "
+        "украшениях — например, «Что такое бакелит?». "
+        f"До {lucy_ai.daily_limit()} вопросов в день бесплатно.\n\n"
         "Выбирай 👇"
     )
 
@@ -899,9 +901,123 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_search(update, text)
         return
 
-    # Всё остальное: Люся не молчит.
+    # Всё остальное — свободный вопрос. Люся не молчит.
     reset_anketa(context)
-    await update.message.reply_text(FALLBACK_TEXT, reply_markup=main_keyboard())
+    await answer_free_question(update, context, text)
+
+
+AI_UNAVAILABLE_TEXT = (
+    "😔 Сейчас не могу ответить на вопрос — я немного перегрелась. "
+    "Попробуй, пожалуйста, чуть позже.\n\n"
+    "А пока можно заглянуть в меню 👇"
+)
+
+AI_LIMIT_TEXT = (
+    "🙈 На сегодня бесплатные вопросы закончились — "
+    "лимит {limit} в день. Завтра снова смогу ответить!\n\n"
+    "А пока можно заглянуть в шкатулку или в уроки 👇"
+)
+
+AI_TOTAL_LIMIT_TEXT = (
+    "🙈 Сегодня мне задали очень много вопросов, и я устала. "
+    "Завтра снова смогу ответить!\n\n"
+    "А пока можно заглянуть в шкатулку или в уроки 👇"
+)
+
+
+async def notify_admin_ai_problem(context, reason):
+    admin_id = os.environ.get("LUCY_ADMIN_ID", "").strip()
+    if not admin_id:
+        return
+    last = context.bot_data.get("ai_alert_at")
+    now = asyncio.get_running_loop().time()
+    if last is not None and now - last < 3600:
+        return
+    context.bot_data["ai_alert_at"] = now
+    if reason == "quota":
+        text = (
+            "⚠️ Люся: OpenAI сообщает, что баланс закончился. "
+            "Свободные ответы не работают, пока баланс не пополнят."
+        )
+    elif reason == "no_key":
+        text = "⚠️ Люся: не задан OPENAI_API_KEY — свободные ответы не работают."
+    else:
+        text = "⚠️ Люся: OpenAI не отвечает. Подробности — в логах Railway."
+    try:
+        await context.bot.send_message(chat_id=int(admin_id), text=text)
+    except Exception as error:
+        print(f"Admin alert failed: {type(error).__name__}")
+
+
+async def answer_free_question(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not lucy_ai.ai_enabled():
+        await update.message.reply_text(FALLBACK_TEXT, reply_markup=main_keyboard())
+        return
+
+    user_id = update.effective_user.id
+    unlimited = is_admin(user_id)
+
+    try:
+        if not unlimited:
+            if lucy_ai.used_today_total(DB_PATH) >= lucy_ai.daily_total_limit():
+                await update.message.reply_text(
+                    AI_TOTAL_LIMIT_TEXT, reply_markup=main_keyboard()
+                )
+                return
+            if lucy_ai.used_today(DB_PATH, user_id) >= lucy_ai.daily_limit():
+                await update.message.reply_text(
+                    AI_LIMIT_TEXT.format(limit=lucy_ai.daily_limit()),
+                    reply_markup=main_keyboard(),
+                )
+                return
+    except Exception as error:
+        print(f"AI usage check failed: {type(error).__name__}: {error}")
+        await update.message.reply_text(AI_UNAVAILABLE_TEXT, reply_markup=main_keyboard())
+        return
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="typing"
+        )
+    except Exception:
+        pass
+
+    history = context.user_data.get("ai_history", [])
+    messages = lucy_ai.build_messages(history, text)
+
+    try:
+        answer = await asyncio.to_thread(lucy_ai.ask_openai, messages)
+    except lucy_ai.AIUnavailable as problem:
+        if problem.reason == "disabled":
+            await update.message.reply_text(FALLBACK_TEXT, reply_markup=main_keyboard())
+            return
+        await notify_admin_ai_problem(context, problem.reason)
+        await update.message.reply_text(AI_UNAVAILABLE_TEXT, reply_markup=main_keyboard())
+        return
+    except Exception as error:
+        print(f"AI answer failed: {type(error).__name__}")
+        await update.message.reply_text(AI_UNAVAILABLE_TEXT, reply_markup=main_keyboard())
+        return
+
+    try:
+        if not unlimited:
+            lucy_ai.record_question(DB_PATH, user_id)
+    except Exception as error:
+        print(f"AI usage record failed: {type(error).__name__}: {error}")
+
+    history = history + [
+        {"role": "user", "content": text[:lucy_ai.MAX_QUESTION_CHARS]},
+        {"role": "assistant", "content": answer},
+    ]
+    context.user_data["ai_history"] = history[-lucy_ai.HISTORY_EXCHANGES * 2:]
+
+    reply = lucy_ai.format_answer(answer)
+    if not unlimited:
+        left = lucy_ai.daily_limit() - lucy_ai.used_today(DB_PATH, user_id)
+        if 0 <= left <= 3:
+            reply += f"\n\nОсталось вопросов на сегодня: {left}."
+
+    await update.message.reply_text(reply, reply_markup=main_keyboard())
 
 
 async def start_anketa(message, context):
@@ -1469,6 +1585,7 @@ def main():
     init_db()
     init_library_db()
     init_knowledge_bridge()
+    lucy_ai.init_ai_usage_table(DB_PATH)
     seed_books()
     seed_knowledge()
     app = Application.builder().token(TOKEN).build()
