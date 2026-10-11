@@ -110,12 +110,12 @@ def init_db():
         """
     )
     columns = [
+        ("deleted_at", "TEXT"),
         ("front_photo", "TEXT"),
         ("back_photo", "TEXT"),
         ("mark_photo", "TEXT"),
         ("details_photo", "TEXT"),
         ("owner_user_id", "INTEGER"),
-        ("deleted_at", "TEXT"),
     ]
 
     existing_columns = {
