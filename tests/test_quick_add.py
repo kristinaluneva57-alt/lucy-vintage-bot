@@ -122,7 +122,7 @@ class QuickAddTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"ПЕРЕД ИССЛЕДОВАНИЕМ — {code}", text)
         self.assertIn("✅ фото лицевой стороны", text)
         self.assertIn("➖ фото оборота", text)
-        self.assertIn("➖ клеймо не указано", text)
+        self.assertIn("➖ клеймо: не указано", text)
         self.assertIn("Желательно, но необязательно: фото оборота, клеймо", text)
         self.assertIn("осталось 3", text)
         self.assertIn("спишется только после нажатия", text)
@@ -253,7 +253,12 @@ class QuickAddTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(item(code)["back_photo"])
         card = await self.chat.press(f"item:{code}")
         self.assertIn(f"edit:{code}", buttons(card))
-        menu = await self.chat.press(f"qmore:{code}")
+        # Анкета не закончена — «Добавить подробности» продолжает её с того же шага,
+        # а «Другие поля карточки» открывает обычное редактирование.
+        resumed = await self.chat.press(f"qmore:{code}")
+        self.assertIn("Продолжаем заполнять", texts(resumed)[0])
+        self.assertIn(f"edit:{code}", buttons(resumed))
+        menu = await self.chat.press(f"edit:{code}")
         self.assertIn(f"ep:{code}:extra", buttons(menu))
         await self.chat.press(f"ef:{code}:measurements")
         await self.chat.say("45 см")
