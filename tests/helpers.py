@@ -194,8 +194,14 @@ class FakeMessage:
     async def reply_text(self, text, reply_markup=None, **kwargs):
         self.chat.sent.append(("text", text, reply_markup))
 
-    async def reply_photo(self, photo, caption=None, **kwargs):
+    async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
         self.chat.sent.append(("photo", photo, caption))
+        if reply_markup is not None:
+            # Подпись и кнопки под фото — отдельной записью, чтобы работали texts()/buttons().
+            self.chat.sent.append(("text", caption, reply_markup))
+
+    async def edit_text(self, text, reply_markup=None, **kwargs):
+        self.chat.sent.append(("text", text, reply_markup))
 
 
 class FakeChat:
@@ -272,6 +278,8 @@ class FakeChat:
             await self.bot.quick_callback(update, self.context)
         elif prefix in ("vpre", "vattr", "vsrc", "vsave"):
             await self.bot.attribution_callback(update, self.context)
+        elif prefix == "bk":
+            await self.bot.books_callback(update, self.context)
         elif prefix == "lorig":
             await self.bot.library_original_callback(update, self.context)
         else:

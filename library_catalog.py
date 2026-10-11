@@ -406,6 +406,103 @@ def catalog():
     return documents
 
 
+_CATALOG_SELECT = """
+    SELECT
+        d.id, d.document_code, d.title, d.meta_title, d.meta_author,
+        d.meta_source, d.language, d.storage_key, d.checksum,
+        COALESCE(j.status, '—'), COALESCE(j.last_completed_page, 0),
+        (SELECT COUNT(*) FROM library_pages p WHERE p.document_id = d.id),
+        (SELECT COUNT(*) FROM library_pages p WHERE p.document_id = d.id
+           AND COALESCE(p.original_text, '') = '')
+    FROM library_documents d
+    LEFT JOIN library_import_jobs j ON j.id = (
+        SELECT MAX(j2.id) FROM library_import_jobs j2 WHERE j2.document_id = d.id
+    )
+"""
+_CATALOG_KEYS = [
+    "id", "code", "file_title", "meta_title", "meta_author", "meta_source",
+    "language", "storage_key", "checksum", "status", "last_page", "pages",
+    "empty_pages",
+]
+_BOOKS_ONLY = "COALESCE(d.storage_key, '') LIKE 'books/%'"
+
+
+def _rows_to_documents(rows):
+    documents = [dict(zip(_CATALOG_KEYS, row)) for row in rows]
+    for document in documents:
+        document["is_book"] = (document["storage_key"] or "").startswith("books/")
+    return documents
+
+
+def count_books():
+    with get_connection() as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) FROM library_documents d WHERE {_BOOKS_ONLY}"
+        ).fetchone()[0]
+
+
+def catalog_summary():
+    """Короткие итоги для шапки каталога — без чтения всех книг."""
+    with get_connection() as conn:
+        documents = conn.execute("SELECT COUNT(*) FROM library_documents").fetchone()[0]
+        books = conn.execute(
+            f"SELECT COUNT(*) FROM library_documents d WHERE {_BOOKS_ONLY}"
+        ).fetchone()[0]
+        untitled = conn.execute(
+            f"SELECT COUNT(*) FROM library_documents d WHERE {_BOOKS_ONLY} "
+            "AND COALESCE(d.meta_title, '') = ''"
+        ).fetchone()[0]
+    return {"documents": documents, "books": books, "service": documents - books, "untitled": untitled}
+
+
+def books_page(page, per_page=10):
+    """Одна страница каталога книг (по возрастанию DOC-ID).
+    Читаются только per_page строк — каталог быстрый и при тысячах книг."""
+    page = max(0, int(page))
+    with get_connection() as conn:
+        rows = conn.execute(
+            _CATALOG_SELECT + f" WHERE {_BOOKS_ONLY} ORDER BY d.id LIMIT ? OFFSET ?",
+            (per_page, page * per_page),
+        ).fetchall()
+    return _rows_to_documents(rows)
+
+
+def book_by_id(document_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            _CATALOG_SELECT + f" WHERE d.id = ? AND {_BOOKS_ONLY}", (document_id,)
+        ).fetchall()
+    documents = _rows_to_documents(rows)
+    return documents[0] if documents else None
+
+
+def book_by_code(document_code):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM library_documents WHERE document_code = ?",
+            ((document_code or "").strip().upper(),),
+        ).fetchone()
+    return book_by_id(row[0]) if row else None
+
+
+def book_neighbors(document_id):
+    """(предыдущая, следующая) книга по DOC-ID и номер страницы списка."""
+    with get_connection() as conn:
+        previous = conn.execute(
+            f"SELECT MAX(d.id) FROM library_documents d WHERE d.id < ? AND {_BOOKS_ONLY}",
+            (document_id,),
+        ).fetchone()[0]
+        following = conn.execute(
+            f"SELECT MIN(d.id) FROM library_documents d WHERE d.id > ? AND {_BOOKS_ONLY}",
+            (document_id,),
+        ).fetchone()[0]
+        position = conn.execute(
+            f"SELECT COUNT(*) FROM library_documents d WHERE d.id < ? AND {_BOOKS_ONLY}",
+            (document_id,),
+        ).fetchone()[0]
+    return previous, following, position
+
+
 # --- дубликаты ---
 
 def _fingerprint(document_id):
