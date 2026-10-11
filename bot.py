@@ -437,6 +437,10 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if details_photo:
         await query.message.reply_photo(photo=details_photo)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /start выводит из незаконченной анкеты.
+    context.user_data["mode"] = None
+    context.user_data["step"] = None
+
     keyboard = ReplyKeyboardMarkup(
         MAIN_MENU,
         resize_keyboard=True,
@@ -454,60 +458,128 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
+PHOTO_STEP_HINTS = {
+    "front_photo": "📸 Сейчас жду фото лицевой стороны украшения целиком.",
+    "back_photo": "📸 Сейчас жду фото оборота украшения целиком.",
+    "mark_photo": (
+        "📸 Сейчас жду фото клейма или надписи крупным планом.\n"
+        "Если клейма нет — нажми «🚫 Клейма нет»."
+    ),
+    "details_photo": (
+        "📸 Сейчас жду крупное фото застёжки, шарнира, "
+        "креплений или другой детали."
+    ),
+}
+
+TEXT_STEP_HINTS = {
+    "measurements": (
+        "Фото больше не нужно — все снимки уже есть. 📸✅\n\n"
+        "Сейчас напиши размеры текстом, например: 52 × 38 мм."
+    ),
+    "weight": (
+        "Фото больше не нужно — все снимки уже есть. 📸✅\n\n"
+        "Сейчас напиши вес в граммах, например: 24.6 г.\n"
+        "Если весов нет — просто напиши «нет»."
+    ),
+    "provenance": (
+        "Фото больше не нужно — все снимки уже есть. 📸✅\n\n"
+        "Сейчас напиши текстом, где ты нашла или купила украшение."
+    ),
+    "seller_story": (
+        "Фото больше не нужно — все снимки уже есть. 📸✅\n\n"
+        "Сейчас напиши текстом, что рассказывал продавец.\n"
+        "Если ничего — просто напиши «нет»."
+    ),
+}
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    step = context.user_data.get("step")
+
+    if context.user_data.get("mode") != "identify" or (
+        step not in PHOTO_STEP_HINTS and step not in TEXT_STEP_HINTS
+    ):
+        await message.reply_text(
+            "📸 Фото получила, но сейчас мы не заполняем карточку.\n\n"
+            "Чтобы сохранить украшение в шкатулку, нажми "
+            "«🔎 Определить украшение» — и я попрошу фото по шагам."
+        )
+        return
+
+    # Альбом приходит отдельными сообщениями с общим media_group_id.
+    # Берём только первое фото альбома, иначе остальные
+    # разлетятся по следующим шагам анкеты.
+    group_id = message.media_group_id
+    if group_id and group_id == context.user_data.get("last_media_group"):
+        if context.user_data.get("album_notice") != group_id:
+            context.user_data["album_notice"] = group_id
+            await message.reply_text(
+                "Из альбома взяла только первое фото. 🙂\n"
+                "Остальные присылай по одному — на каждый шаг своё."
+            )
+        return
+    context.user_data["last_media_group"] = group_id
+
+    if step in TEXT_STEP_HINTS:
+        await message.reply_text(TEXT_STEP_HINTS[step])
+        return
+
+    if step == "front_photo":
+        context.user_data["front_photo"] = message.photo[-1].file_id
+        context.user_data["step"] = "back_photo"
+        await message.reply_text(
+            "Фото лицевой стороны получила. 📸✨\n\n"
+            "Теперь переверни украшение и пришли фото оборота целиком.\n\n"
+            "💬 Люся: Не обрезай застёжку и края — сзади иногда интереснее, чем спереди. 😏"
+        )
+        return
+    if step == "back_photo":
+        context.user_data["back_photo"] = message.photo[-1].file_id
+        context.user_data["step"] = "mark_photo"
+        mark_keyboard = ReplyKeyboardMarkup(
+            [["🚫 Клейма нет"]],
+            resize_keyboard=True
+        )
+        await message.reply_text(
+            "Оборот получила. 🔄✨\n\n"
+            "Теперь посмотрим маркировку.\n"
+            "Если есть клеймо, подпись, буквы, цифры или странный значок — "
+            "пришли его отдельным фото крупным планом.\n\n"
+            "💬 Люся: Если камера не фокусируется, немного отодвинь телефон. "
+            "Резкое фото издалека полезнее размытого макро. 🔎",
+             reply_markup=mark_keyboard
+        )
+        return
+    if step == "mark_photo":
+        context.user_data["mark_photo"] = message.photo[-1].file_id
+        context.user_data["step"] = "details_photo"
+        await message.reply_text(
+            "Фото маркировки получила. 🔎✨\n\n"
+            "Сохраняем её как отдельную зацепку — само клеймо "
+            "ещё не считаем доказательством производителя.\n\n"
+            "Теперь пришли крупное фото застёжки, шарнира, креплений "
+            "или другой характерной детали."
+        )
+        return
+    if step == "details_photo":
+        context.user_data["details_photo"] = message.photo[-1].file_id
+        context.user_data["step"] = "measurements"
+        await message.reply_text(
+            "Деталь получила. 🔎✨\n\n"
+            "Теперь запишем размеры украшения.\n\n"
+            "📏 Измерь максимальную высоту и ширину и напиши их в миллиметрах.\n"
+            "Например: 52 × 38 мм.\n\n"
+            "💬 Люся: Если линейки сейчас нет — ничего страшного, этот шаг можно будет пропустить."
+        )
+        return
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if update.message.photo:
-        if context.user_data.get("mode") == "identify":
-            step = context.user_data.get("step")
-
-            if step == "front_photo":
-                context.user_data["front_photo"] = update.message.photo[-1].file_id
-                context.user_data["step"] = "back_photo"
-                await update.message.reply_text(
-                    "Фото лицевой стороны получила. 📸✨\n\n"
-                    "Теперь переверни украшение и пришли фото оборота целиком.\n\n"
-                    "💬 Люся: Не обрезай застёжку и края — сзади иногда интереснее, чем спереди. 😏"
-                )
-                return
-        if step == "back_photo":
-            context.user_data["back_photo"] = update.message.photo[-1].file_id
-            context.user_data["step"] = "mark_photo"
-            mark_keyboard = ReplyKeyboardMarkup(
-                [["🚫 Клейма нет"]],
-                resize_keyboard=True
-            )
-            await update.message.reply_text(
-                "Оборот получила. 🔄✨\n\n"
-                "Теперь посмотрим маркировку.\n"
-                "Если есть клеймо, подпись, буквы, цифры или странный значок — "
-                "пришли его отдельным фото крупным планом.\n\n"
-                "💬 Люся: Если камера не фокусируется, немного отодвинь телефон. "
-                "Резкое фото издалека полезнее размытого макро. 🔎",
-                 reply_markup=mark_keyboard
-            )
-            return
-        if step == "mark_photo":
-            context.user_data["mark_photo"] = update.message.photo[-1].file_id
-            context.user_data["step"] = "details_photo"
-            await update.message.reply_text(
-                "Фото маркировки получила. 🔎✨\n\n"
-                "Сохраняем её как отдельную зацепку — само клеймо "
-                "ещё не считаем доказательством производителя.\n\n"
-                "Теперь пришли крупное фото застёжки, шарнира, креплений "
-                "или другой характерной детали."
-            )
-            return
-        if step == "details_photo":
-            context.user_data["details_photo"] = update.message.photo[-1].file_id
-            context.user_data["step"] = "measurements"
-            await update.message.reply_text(
-                "Деталь получила. 🔎✨\n\n"
-                "Теперь запишем размеры украшения.\n\n"
-                "📏 Измерь максимальную высоту и ширину и напиши их в миллиметрах.\n"
-                "Например: 52 × 38 мм.\n\n"
-                "💬 Люся: Если линейки сейчас нет — ничего страшного, этот шаг можно будет пропустить."
-            )
-            return
+        await handle_photo(update, context)
+        return
     if (
         context.user_data.get("mode") == "identify"
         and context.user_data.get("step") == "measurements"
@@ -599,6 +671,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "или происхождении украшения.\n\n"
                 "Теперь пришли крупное фото застёжки, шарнира, креплений "
                 "или других необычных деталей. 🔎"
+        )
+        return
+    if (
+        context.user_data.get("mode") == "identify"
+        and context.user_data.get("step") in PHOTO_STEP_HINTS
+        and text
+        and text not in sum(MAIN_MENU, [])
+    ):
+        await update.message.reply_text(
+            PHOTO_STEP_HINTS[context.user_data["step"]]
+            + "\n\nЧтобы выйти из анкеты, нажми /start."
         )
         return
     if text == "🔎 Определить украшение":
