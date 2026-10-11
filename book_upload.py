@@ -16,6 +16,7 @@ from telegram.ext import ContextTypes
 from library_db import get_connection
 from library_importer import (
     OCR_LANGUAGES,
+    metadata_lines,
     calculate_checksum,
     import_pdf_with_ocr,
 )
@@ -257,9 +258,10 @@ async def _import_and_report(message, storage_key, title, language):
         )
         await message.reply_text(
             "✅ КНИГА В БИБЛИОТЕКЕ\n\n"
-            f"📚 {title}\n"
+            f"📚 Файл: {title}\n"
             f"Документ: {result['document_code']}\n"
-            f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
+            + metadata_lines(result)
+            + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
             f"PDF-страниц: {result['total_pages']}\n"
             f"Обработано: {result['completed_pages']}\n"
             f"Статус: {result['status']}"

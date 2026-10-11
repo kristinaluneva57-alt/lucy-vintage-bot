@@ -363,7 +363,8 @@ def search_pages(db_path, plan, limit=MAX_RESULTS):
     try:
         rows = conn.execute(
             f"""
-            SELECT d.title, d.language, p.pdf_page, p.printed_page,
+            SELECT COALESCE(NULLIF(d.meta_title, ''), d.title),
+                   d.language, p.pdf_page, p.printed_page,
                    COALESCE(p.cleaned_text, p.original_text),
                    p.original_text, d.document_code
             FROM library_pages p

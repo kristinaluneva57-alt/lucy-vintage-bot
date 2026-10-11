@@ -5,6 +5,7 @@ import time
 
 import library_search
 import library_ai
+import library_catalog
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
@@ -1417,6 +1418,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # Всё, что начинается с «/», — команда. В ИИ-чат и в анкету не попадает.
+    if text.startswith("/"):
+        await route_text_command(update, context)
+        return
+
     mode = context.user_data.get("mode")
     step = context.user_data.get("step")
 
@@ -2260,42 +2266,346 @@ async def _reocr_and_report(message, document_code, language, force_ocr):
         )
 
 
-@admin_only
-async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        rows = await asyncio.to_thread(list_documents)
-    except Exception as error:
-        print(f"list_documents failed: {type(error).__name__}: {error}")
-        await update.message.reply_text("❌ Не получилось прочитать каталог.")
-        return
+STATUS_LABELS = {
+    "completed": ("✅", "готово"),
+    "processing": ("⏳", "обрабатывается"),
+    "pending": ("🕓", "в очереди"),
+    "error": ("❌", "ошибка"),
+}
 
-    books = [row for row in rows if (row[7] or "").startswith("books/")]
-    if not books:
-        await update.message.reply_text("📚 В библиотеке пока нет книг.")
-        return
 
-    status_icons = {
-        "completed": "✅", "processing": "⏳",
-        "pending": "🕓", "error": "❌",
-    }
-    lines = [f"📚 КАТАЛОГ БИБЛИОТЕКИ — {len(books)} книг\n"]
-    for code, title, language, status, last_page, pages, empty, _ in books:
-        icon = status_icons.get(status, "•")
-        lines.append(
-            f"{icon} {code} · {title[:60]}\n"
-            f"   язык: {OCR_LANGUAGES.get(language or '', language or '—')} · "
-            f"страниц: {pages} (пустых: {empty}) · статус: {status}"
-            + (f" (до стр. {last_page})" if status in ("processing", "error") else "")
-        )
-
+async def send_long(message, lines, limit=3800):
     chunk = ""
     for line in lines:
-        if len(chunk) + len(line) + 1 > 3800:
-            await update.message.reply_text(chunk)
+        if chunk and len(chunk) + len(line) + 1 > limit:
+            await message.reply_text(chunk)
             chunk = ""
         chunk += line + "\n"
     if chunk:
-        await update.message.reply_text(chunk)
+        await message.reply_text(chunk)
+
+
+def format_catalog(documents, exact, possible):
+    books = [d for d in documents if d["is_book"]]
+    service = [d for d in documents if not d["is_book"]]
+    lines = [
+        "📚 КАТАЛОГ БИБЛИОТЕКИ",
+        f"Всего документов: {len(documents)} · книг: {len(books)}",
+        "",
+    ]
+    for document in books:
+        icon, status = STATUS_LABELS.get(document["status"], ("•", document["status"]))
+        if document["status"] in ("processing", "error"):
+            status += f" (до стр. {document['last_page']})"
+        title = document["meta_title"] or library_catalog.UNDEFINED_TITLE
+        if document["meta_source"] == "manual":
+            title += " ✍️"
+        details = [
+            f"язык: {OCR_LANGUAGES.get(document['language'] or '', document['language'] or '—')}",
+            f"страниц: {document['pages']}",
+            status,
+        ]
+        if document["empty_pages"]:
+            details.insert(2, f"пустых: {document['empty_pages']}")
+        lines.append(f"{icon} {document['code']} · {title}")
+        if document["meta_author"]:
+            lines.append(f"   автор: {document['meta_author']}")
+        lines.append("   " + " · ".join(details))
+        lines.append(f"   файл: {document['file_title']}")
+
+    if service:
+        lines += ["", "Служебные записи (не книги): " + ", ".join(d["code"] for d in service)]
+
+    untitled = [d["code"] for d in books if not d["meta_title"]]
+    if untitled:
+        lines += [
+            "",
+            f"❓ Без названия: {len(untitled)}. Определить по тексту книги: "
+            "/fixmeta all · задать вручную: /settitle DOC-000001 Название | Автор",
+        ]
+    if exact or possible:
+        lines += [
+            "",
+            f"⚠️ Дубликаты: точных {len(exact)}, возможных {len(possible)} — "
+            "подробнее /dupes. Ничего не удаляется автоматически.",
+        ]
+    return lines
+
+
+@admin_only
+async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        documents = await asyncio.to_thread(library_catalog.catalog)
+        exact, possible = await asyncio.to_thread(library_catalog.find_duplicates, documents)
+    except Exception as error:
+        print(f"catalog failed: {type(error).__name__}: {error}")
+        await update.message.reply_text("❌ Не получилось прочитать каталог.")
+        return
+
+    if not documents:
+        await update.message.reply_text("📚 В библиотеке пока нет документов.")
+        return
+
+    await send_long(update.message, format_catalog(documents, exact, possible))
+
+
+def format_detected(code, detected, saved, manual):
+    if manual:
+        return f"✍️ {code}: название задано вручную — не меняю (добавь force, чтобы перезаписать)."
+    lines = []
+    if detected["title"]:
+        lines.append(f"✅ {code}: {detected['title']}")
+    else:
+        line = f"❓ {code}: {library_catalog.UNDEFINED_TITLE}"
+        if detected.get("title_candidate"):
+            line += f" (возможно: «{detected['title_candidate']}» — проверь по книге)"
+        lines.append(line)
+    if detected["author"]:
+        lines.append(f"   автор: {detected['author']}")
+    elif detected.get("author_candidate"):
+        lines.append(f"   автор не определён (возможно: «{detected['author_candidate']}»)")
+    if not detected["title"] and detected.get("reason"):
+        lines.append(f"   причина: {detected['reason']}")
+    return "\n".join(lines)
+
+
+@admin_only
+async def fixmeta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [arg.strip() for arg in (context.args or []) if arg.strip()]
+    if not args:
+        await update.message.reply_text(
+            "🔖 НАЗВАНИЯ И АВТОРЫ КНИГ\n\n"
+            "По уже распознанному тексту (бесплатно, PDF не загружается заново):\n"
+            "/fixmeta DOC-000005\n"
+            "/fixmeta all — все книги без ручного названия\n\n"
+            "Если OCR титульного листа плохой — заново распознать первые "
+            "страницы из PDF (только для названия, страницы книги не меняются):\n"
+            "/fixmeta DOC-000005 ocr\n\n"
+            "force — перезаписать название, заданное вручную.\n"
+            "Задать вручную: /settitle DOC-000005 Название | Автор"
+        )
+        return
+
+    target = args[0].upper()
+    options = {arg.lower() for arg in args[1:]}
+    force = "force" in options
+    use_ocr = "ocr" in options
+
+    if target == "ALL":
+        documents = await asyncio.to_thread(library_catalog.catalog)
+        lines = ["🔖 НАЗВАНИЯ И АВТОРЫ — по сохранённому тексту", ""]
+        for document in documents:
+            if not document["is_book"]:
+                continue
+            try:
+                detected, saved, manual = await asyncio.to_thread(
+                    library_catalog.refresh_document_metadata, document["id"], None, force
+                )
+                lines.append(format_detected(document["code"], detected, saved, manual))
+            except Exception as error:
+                print(f"fixmeta failed: {type(error).__name__}: {error}")
+                lines.append(f"❌ {document['code']}: не получилось прочитать страницы")
+        lines += ["", "Ничего не удалено. Проверить каталог: /books"]
+        await send_long(update.message, lines)
+        return
+
+    document = await asyncio.to_thread(library_catalog.get_document, target)
+    if document is None:
+        await update.message.reply_text(f"❌ Документ {target} не найден. Список — /books")
+        return
+
+    if use_ocr:
+        await update.message.reply_text(
+            f"🔎 Распознаю первые страницы {target} заново — только для названия. "
+            "Напишу, когда закончу."
+        )
+        context.application.create_task(
+            _fixmeta_ocr_and_report(update.message, target, force)
+        )
+        return
+
+    detected, saved, manual = await asyncio.to_thread(
+        library_catalog.refresh_document_metadata, document[0], None, force
+    )
+    await update.message.reply_text(format_detected(document[1], detected, saved, manual))
+
+
+async def _fixmeta_ocr_and_report(message, document_code, force):
+    try:
+        document_id, pages = await asyncio.to_thread(
+            library_catalog.ocr_title_pages, document_code
+        )
+        saved_pages = await asyncio.to_thread(library_catalog.first_pages, document_id)
+        fresh = {number: text for number, text in pages}
+        merged = [(number, fresh.get(number) or text) for number, text in saved_pages]
+        for number, text in pages:
+            if number not in {n for n, _ in merged}:
+                merged.append((number, text))
+        merged.sort()
+        detected, saved, manual = await asyncio.to_thread(
+            library_catalog.refresh_document_metadata, document_id, merged, force
+        )
+        await message.reply_text(format_detected(document_code, detected, saved, manual))
+    except LookupError as error:
+        await message.reply_text(f"❌ {error}")
+    except Exception as error:
+        print(f"fixmeta ocr failed: {type(error).__name__}: {error}")
+        await message.reply_text(
+            f"❌ Не получилось распознать титульные страницы {document_code}. "
+            "Подробности — в журнале Railway. Название можно задать вручную: "
+            f"/settitle {document_code} Название | Автор"
+        )
+
+
+@admin_only
+async def settitle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "✍️ Формат: /settitle DOC-000005 Название книги | Автор\n"
+            "Автора можно не указывать: /settitle DOC-000005 Название книги"
+        )
+        return
+
+    code = args[0].upper()
+    title, _, author = " ".join(args[1:]).partition("|")
+    title, author = title.strip(), author.strip()
+    if not title or len(title) > 200 or len(author) > 200:
+        await update.message.reply_text("Название и автор — до 200 символов каждое.")
+        return
+
+    try:
+        code = await asyncio.to_thread(library_catalog.set_manual_metadata, code, title, author)
+    except LookupError as error:
+        await update.message.reply_text(f"❌ {error}")
+        return
+
+    await update.message.reply_text(
+        f"✅ {code}: {title}" + (f"\n   автор: {author}" if author else "")
+        + "\nНазвание задано вручную — автоматическое определение его не перезапишет."
+    )
+
+
+@admin_only
+async def dupes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    options = {arg.lower() for arg in (context.args or [])}
+    if "hash" in options:
+        missing = await asyncio.to_thread(library_catalog.documents_without_hash)
+        if not missing:
+            await update.message.reply_text("У всех книг уже есть SHA-256. Проверка: /dupes")
+            return
+        await update.message.reply_text(
+            f"🔐 Считаю SHA-256 исходных PDF из R2 для {len(missing)} книг без хеша. "
+            "Хеш записывается только в пустое поле, книги не меняются. Напишу, когда закончу."
+        )
+        context.application.create_task(_fill_hashes_and_report(update.message))
+        return
+
+    documents = await asyncio.to_thread(library_catalog.catalog)
+    exact, possible = await asyncio.to_thread(library_catalog.find_duplicates, documents)
+    missing = library_catalog.documents_without_hash(documents)
+    titles = {d["code"]: d["meta_title"] or d["file_title"] for d in documents}
+
+    lines = ["🔍 ПРОВЕРКА ДУБЛИКАТОВ", ""]
+    if exact:
+        lines.append("Точные дубли (одинаковый SHA-256 исходного PDF):")
+        for group in exact:
+            lines.append("• " + ", ".join(f"{c} ({titles[c]})" for c in group))
+        lines.append("")
+    if possible:
+        lines.append("Возможные совпадения — проверь вручную:")
+        for group, reason in possible:
+            lines.append("• " + ", ".join(f"{c} ({titles[c]})" for c in group) + f" — {reason}")
+        lines.append("")
+    if not exact and not possible:
+        lines += ["Дубликатов не нашла. ✨", ""]
+    if missing:
+        lines.append(
+            f"Без SHA-256: {len(missing)} книг (" + ", ".join(d["code"] for d in missing[:10])
+            + (" …" if len(missing) > 10 else "")
+            + "). Посчитать по PDF из R2: /dupes hash"
+        )
+    lines.append("Ничего не удаляется автоматически.")
+    await send_long(update.message, lines)
+
+
+async def _fill_hashes_and_report(message):
+    try:
+        filled, failed = await asyncio.to_thread(library_catalog.fill_missing_checksums)
+    except Exception as error:
+        print(f"fill checksums failed: {type(error).__name__}: {error}")
+        await message.reply_text("❌ Не получилось посчитать хеши. Подробности — в журнале Railway.")
+        return
+    text = f"✅ SHA-256 посчитан: {len(filled)}."
+    if failed:
+        text += f"\nНе удалось (PDF недоступен?): {', '.join(failed)}."
+    await message.reply_text(text + "\nРезультат проверки: /dupes")
+
+
+# --- команды, набранные текстом ---
+# Telegram помечает команду только если «/» стоит в самом начале и
+# в имени только латиница. «/ books», « /books», «/bооks» с русской «о»
+# или голосовой ввод приходят как обычный текст. Такой текст разбираем
+# здесь, чтобы он никогда не попал в ИИ-чат.
+
+CYRILLIC_LOOKALIKES = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o",
+    "р": "p", "с": "c", "т": "t", "у": "y", "х": "x", "і": "i",
+})
+
+
+def text_commands():
+    return {
+        "start": start,
+        "books": books_command,
+        "fixmeta": fixmeta_command,
+        "settitle": settitle_command,
+        "dupes": dupes_command,
+        "reocr": reocr_command,
+        "bigbook": bigbook_command,
+    }
+
+
+def parse_text_command(text):
+    """«/ Books@LucyVintageBot DOC-1» → ("books", ["DOC-1"]). Не команда → None."""
+    stripped = (text or "").strip()
+    if not stripped.startswith("/"):
+        return None
+    body = stripped[1:].strip()
+    if not body:
+        return "", []
+    parts = body.split()
+    name = parts[0].split("@", 1)[0].lower().translate(CYRILLIC_LOOKALIKES)
+    name = name.rstrip(".,!?;:")
+    return name, parts[1:]
+
+
+async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parsed = parse_text_command(update.message.text)
+    if parsed is None:
+        return False
+    name, args = parsed
+    handler = text_commands().get(name)
+    if handler is None:
+        print(f"Unknown command: /{name[:30]}")
+        known = "/start"
+        if is_admin(update.effective_user.id):
+            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook"
+        await update.message.reply_text(
+            f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
+            reply_markup=main_keyboard(),
+        )
+        return True
+    context.args = args
+    await handler(update, context)
+    return True
+
+
+async def command_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команды, которые не поймал CommandHandler (неизвестные, с опечаткой)."""
+    if update.message is None or not update.message.text:
+        return
+    await route_text_command(update, context)
 
 
 def main():
@@ -2321,6 +2631,9 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CommandHandler("reocr", reocr_command))
     app.add_handler(CommandHandler("books", books_command))
+    app.add_handler(CommandHandler("fixmeta", fixmeta_command))
+    app.add_handler(CommandHandler("settitle", settitle_command))
+    app.add_handler(CommandHandler("dupes", dupes_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
@@ -2346,6 +2659,14 @@ def main():
         MessageHandler(
             filters.ChatType.PRIVATE & filters.PHOTO,
             handle_message,
+        )
+    )
+
+    # Команды, которые не поймал ни один CommandHandler выше.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.COMMAND,
+            command_fallback,
         )
     )
     

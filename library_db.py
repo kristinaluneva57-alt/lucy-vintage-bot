@@ -49,6 +49,20 @@ def init_library_db():
             ).fetchall()
         ]
 
+        # Метаданные каталога (название и автор по титульному листу).
+        # Колонки только добавляются, существующие данные не меняются.
+        document_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(library_documents)"
+            ).fetchall()
+        }
+        for column in ("meta_title", "meta_author", "meta_source", "meta_checked_at"):
+            if column not in document_columns:
+                conn.execute(
+                    f"ALTER TABLE library_documents ADD COLUMN {column} TEXT"
+                )
+
         if "cleaned_text" not in columns:
             conn.execute(
                 "ALTER TABLE library_pages "
