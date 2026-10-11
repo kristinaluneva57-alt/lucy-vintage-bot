@@ -131,6 +131,7 @@ class FakeOpenAI:
     error = None
     fail_kind = None
     compare_override = None
+    describe_override = None
     read_answer = {"text": "", "legible": False, "set_name": None, "years": [], "unclear": "всё"}
     USAGE = {"describe": (5200, 420), "compare": (11800, 900), "read_text": (3100, 150)}
 
@@ -170,6 +171,8 @@ class FakeOpenAI:
                 "marks": [{"text": "SARAH COVENTRY", "legible": True}],
                 "search_terms": ["necklace", "Y necklace", "red stones", "silvertone", "collana"],
             }
+            if FakeOpenAI.describe_override is not None:
+                answer = FakeOpenAI.describe_override
         elif kind == "compare":
             labels = {}
             for part in content:
@@ -288,6 +291,7 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
         FakeOpenAI.error = None
         FakeOpenAI.fail_kind = None
         FakeOpenAI.compare_override = None
+        FakeOpenAI.describe_override = None
         FakeOpenAI.read_answer = {"text": "", "legible": False, "set_name": None, "years": [], "unclear": "всё"}
 
         self.owner = self.chat(OWNER)
@@ -417,7 +421,7 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
         report = texts(replies)[0]
 
         self.assertIn("Серебристое Y-образное колье", report)
-        self.assertIn("Производитель: Sarah Coventry (по клейму на украшении)", report)
+        self.assertIn("Производитель: Sarah Coventry — по клейму, указанному владелицей", report)
         self.assertIn("Комплект: «Crimson Cascade» — напечатано в источнике [1]", report)
         self.assertIn("1965 — год рекламы", report)
         self.assertIn("✅ точное совпадение модели", report)
