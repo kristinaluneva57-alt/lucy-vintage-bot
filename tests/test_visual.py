@@ -108,11 +108,28 @@ def user_photo(kind):
     return jpeg(image)
 
 
+class JsonModeError(openai_module.OpenAIError):
+    """Ошибка, которую OpenAI возвращает при JSON-режиме без слова JSON."""
+
+    status_code = 400
+    type = "invalid_request_error"
+    code = None
+    param = "messages"
+
+    def __init__(self):
+        Exception.__init__(self)
+        self.message = (
+            "'messages' must contain the word 'json' in some form, to use "
+            "'response_format' of type 'json_object'."
+        )
+
+
 class FakeOpenAI:
     """Поддельный OpenAI: отвечает по типу запроса, считает токены."""
 
     calls = []
     error = None
+    fail_kind = None
     compare_override = None
     read_answer = {"text": "", "legible": False, "set_name": None, "years": [], "unclear": "всё"}
     USAGE = {"describe": (5200, 420), "compare": (11800, 900), "read_text": (3100, 150)}
@@ -133,6 +150,13 @@ class FakeOpenAI:
         content = kwargs["messages"][1]["content"]
         kind = self.kind(system)
         FakeOpenAI.calls.append({"kind": kind, "content": content, **kwargs})
+        # Как настоящий OpenAI: JSON-режим без слова «JSON» в сообщениях — ошибка 400.
+        if (kwargs.get("response_format") or {}).get("type") == "json_object":
+            texts_lower = (system + " ".join(p.get("text", "") for p in content)).lower()
+            if "json" not in texts_lower:
+                raise JsonModeError()
+        if FakeOpenAI.fail_kind == kind:
+            raise JsonModeError()
         if FakeOpenAI.error is not None:
             raise FakeOpenAI.error
 
@@ -262,6 +286,7 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(patch.stop)
         FakeOpenAI.calls = []
         FakeOpenAI.error = None
+        FakeOpenAI.fail_kind = None
         FakeOpenAI.compare_override = None
         FakeOpenAI.read_answer = {"text": "", "legible": False, "set_name": None, "years": [], "unclear": "всё"}
 
@@ -490,7 +515,10 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
         os.environ["LUCY_VISUAL_BUDGET_DAY_USD"] = "0.006"
         _, replies = await self.research()
         self.assertEqual([c["kind"] for c in FakeOpenAI.calls], ["describe"])
-        self.assertIn("платные операции остановлены", texts(replies)[0])
+        report = texts(replies)[0]
+        self.assertIn("ИССЛЕДОВАНИЕ НЕ ЗАВЕРШЕНО", report)
+        self.assertIn("достигнут дневной бюджет", report)
+        self.assertIn("Серебристое Y-образное колье", report)  # описание сохранено
         self.assertEqual(attribution.paid_this_month(bot.DB_PATH, OWNER), 0)  # попытка не списана
 
     async def test_api_error_falls_back_without_secrets(self):
@@ -614,6 +642,7 @@ class BudgetConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(patch.stop)
         FakeOpenAI.calls = []
         FakeOpenAI.error = None
+        FakeOpenAI.fail_kind = None
         FakeOpenAI.read_answer = {"text": "x", "legible": False, "set_name": None, "years": [], "unclear": ""}
 
     def rows(self):

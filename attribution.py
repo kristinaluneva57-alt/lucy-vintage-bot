@@ -94,7 +94,7 @@ For EVERY page return an object in "pages" with keys:
 "dates": [{"year": int, "kind": "advertisement"|"catalog"|"production"|"unknown", "basis": what on the page shows it}],
 "confidence": 0.0-1.0.
 Rules: never invent names, dates, materials or quotes. A similar piece is NOT the same model — use "stylistic". The year of an advertisement or catalogue is NOT the production year unless the page says so. If text is too small or blurry, set text_legible=false.
-Also return "summary_ru": 1-3 sentences in Russian."""
+Return a single JSON object: {"pages": [one object per page as described above], "summary_ru": "1-3 sentences in Russian"}."""
 
 READ_SYSTEM = """You read small printed text in a cropped area of a historical page (advertisement, catalogue or caption).
 Return JSON: "text": the text exactly as printed (keep original language and spelling), "legible": true|false,
@@ -183,6 +183,16 @@ def photos_hash(photos, version):
 
 class AlreadyRunning(Exception):
     pass
+
+
+class PartialResult(Exception):
+    """Описание получено, но сравнение не выполнено (ошибка ИИ, бюджет,
+    не удалось получить изображения страниц)."""
+
+    def __init__(self, result, reason):
+        super().__init__(reason)
+        self.result = result
+        self.reason = reason
 
 
 _USED_SLOTS = """
@@ -441,6 +451,12 @@ def run(db_path, user_id, item_code, photos, card, is_admin=False):
             try:
                 result = _run_ai(db_path, attribution_id, user_id, photos, card)
                 paid = True
+            except PartialResult as partial:
+                # Описание и кандидаты сохраняются; попытка не списывается.
+                result = partial.result
+                result["partial"] = True
+                result["partial_reason"] = partial.reason
+                mode = "partial"
             except visual_ai.BudgetExceeded as error:
                 # Незавершённое исследование не списывает бесплатную попытку.
                 result = _run_free(db_path, card, note=f"достигнут {error} — платные операции остановлены")
@@ -477,6 +493,7 @@ def _run_free(db_path, card, note=None):
                 "pdf_page": c["pdf_page"],
                 "verdict": None,
                 "captions": c["captions"][:3],
+                "why": c.get("why", []),
             }
             for n, c in enumerate(candidates, 1)
         ],
@@ -523,11 +540,31 @@ def _run_ai(db_path, attribution_id, user_id, photos, card):
         "brands_from_mark": brands,
         "terms": terms[:15],
         "candidates_found": len(candidates),
+        "candidates": [
+            {
+                "n": n,
+                "document_id": c["document_id"],
+                "document_code": c["document_code"],
+                "title": c["title"],
+                "pdf_page": c["pdf_page"],
+                "verdict": None,
+                "captions": c["captions"][:3],
+                "why": c.get("why", []),
+                "score": c["score"],
+            }
+            for n, c in enumerate(candidates[:MAX_COMPARE_PAGES], 1)
+        ],
         "evidence": [],
         "summary": None,
     }
     if not candidates:
         return result
+
+    def stop(reason):
+        # Честный частичный результат: описание и найденные по тексту
+        # кандидаты, без заявлений о совпадении.
+        result["evidence"] = [dict(c) for c in result["candidates"]]
+        raise PartialResult(result, reason)
 
     pages = []
     for candidate in candidates[:MAX_COMPARE_PAGES]:
@@ -539,8 +576,7 @@ def _run_ai(db_path, attribution_id, user_id, photos, card):
             continue
         pages.append((candidate, page_images.shrink_jpeg(image)))
     if not pages:
-        result["render_failed"] = True
-        return result
+        stop("не удалось получить изображения страниц для сравнения")
 
     # ③ сравнение с не более чем MAX_COMPARE_PAGES страницами
     content = [{"type": "text", "text": "USER photos:"}]
@@ -553,10 +589,18 @@ def _run_ai(db_path, attribution_id, user_id, photos, card):
                     f"OCR excerpt (may contain errors): {excerpt[:500]}",
         })
         content.append(visual_ai.image_part(image))
-    compared = visual_ai.call_json(
-        kind="compare", system=COMPARE_SYSTEM, content=content,
-        images=min(2, len(small)) + len(pages), max_tokens=1400, **calls,
-    )
+    try:
+        compared = visual_ai.call_json(
+            kind="compare", system=COMPARE_SYSTEM, content=content,
+            images=min(2, len(small)) + len(pages), max_tokens=1400, **calls,
+        )
+    except visual_ai.BudgetExceeded as error:
+        stop(f"сравнение остановлено: достигнут {error}")
+    except visual_ai.VisualAIUnavailable as error:
+        stop(
+            "сравнение со страницами не выполнено: ошибка OpenAI"
+            + (" (закончился баланс)" if error.reason == "quota" else "")
+        )
     result["summary"] = compared.get("summary_ru")
 
     by_label = {
@@ -594,11 +638,16 @@ def _run_ai(db_path, attribution_id, user_id, photos, card):
             if needs_reading:
                 # Платное чтение ИИ — только для области текста (подпись/реклама);
                 # область самого украшения читаем лишь бесплатным Tesseract.
-                crop_text, method, legible = _read_small_text(
-                    db_path, candidate, cell,
-                    allow_ai=bool(evidence["text_cell"]) and ai_reads < MAX_AI_TEXT_READS,
-                    calls=calls,
-                )
+                try:
+                    crop_text, method, legible = _read_small_text(
+                        db_path, candidate, cell,
+                        allow_ai=bool(evidence["text_cell"]) and ai_reads < MAX_AI_TEXT_READS,
+                        calls=calls,
+                    )
+                except (visual_ai.BudgetExceeded, visual_ai.VisualAIUnavailable):
+                    # Чтение мелкого текста не удалось — сравнение всё равно засчитано,
+                    # но текст рекламы остаётся неподтверждённым.
+                    crop_text, method, legible = "", "vision", False
                 if method == "vision":
                     ai_reads += 1
                 evidence["read_text"] = crop_text[:800] if legible else None
@@ -695,6 +744,10 @@ def _read_small_text(db_path, candidate, cell, allow_ai, calls):
 
 # --- отчёт ---
 
+def verdict_label(verdict):
+    return VERDICT_LABELS.get(verdict, "не сравнивалась с фото")
+
+
 def best_evidence(result):
     good = [e for e in result.get("evidence", []) if e.get("verdict") in ("exact", "probable")]
     return good[0] if good else None
@@ -722,6 +775,9 @@ def format_report(result):
             for caption in evidence.get("captions") or []:
                 lines.append(f"     «{caption[:120]}»")
         return "\n".join(lines)
+
+    if result.get("partial"):
+        return format_partial(result)
 
     lines.append("🔬 ИССЛЕДОВАНИЕ ПО БИБЛИОТЕКЕ")
     if result.get("from_cache"):
@@ -786,7 +842,7 @@ def format_report(result):
         if best.get("set_items"):
             lines.append("В комплект, по источнику, входят: " + ", ".join(best["set_items"]))
 
-        lines.append(f"Уверенность: {VERDICT_LABELS[best['verdict']]}")
+        lines.append(f"Уверенность: {verdict_label(best['verdict'])}")
         if best.get("matching"):
             lines.append("Почему совпадает: " + "; ".join(best["matching"]))
         if best.get("differences"):
@@ -804,11 +860,58 @@ def format_report(result):
     if evidence:
         lines += ["", "📖 Проверенные источники:"]
         for item in evidence:
-            lines.append(f"[{item['n']}] {source_line(item)} — {VERDICT_LABELS[item['verdict']]}")
+            lines.append(f"[{item['n']}] {source_line(item)} — {verdict_label(item['verdict'])}")
 
     if unconfirmed:
         lines += ["", "❓ Не подтверждено: " + "; ".join(dict.fromkeys(unconfirmed)) + "."]
     lines += ["", "Похожее украшение — ещё не та же модель. Изображения страниц — по кнопкам ниже."]
+    return "\n".join(lines)
+
+
+def format_partial(result):
+    """Исследование оборвалось после описания: честно показываем, что есть."""
+    reason = result.get("partial_reason") or "сравнение не выполнено"
+    lines = [
+        "🔬 ИССЛЕДОВАНИЕ НЕ ЗАВЕРШЕНО",
+        f"⚠️ {reason[:1].upper() + reason[1:]}.",
+        "Бесплатная попытка не списана.",
+    ]
+    description = result.get("description") or {}
+    if description.get("text"):
+        lines += ["", f"Что на фото (описание ИИ): {description['text']}"]
+    marks = [m for m in description.get("marks") or [] if m.get("text")]
+    if marks:
+        lines.append("Клеймо на фото: " + ", ".join(
+            f"«{m['text']}»" + ("" if m.get("legible") else " (нечётко)") for m in marks
+        ))
+    evidence = result.get("evidence") or []
+    if evidence:
+        lines += [
+            "",
+            "Страницы-кандидаты — найдены по тексту книг, с фото НЕ сравнивались. "
+            "Это не атрибуция: посмотри их сама по кнопкам ниже.",
+        ]
+        for item in evidence:
+            lines.append(f"[{item['n']}] {source_line(item)}")
+            if item.get("why"):
+                lines.append("     почему выбрана: " + "; ".join(item["why"][:3]))
+    else:
+        lines += ["", "Страниц-кандидатов по тексту не нашлось."]
+    lines += ["", "Производитель, модель, комплект и датировка не установлены. "
+              "Можно попробовать ещё раз позже."]
+    return "\n".join(lines)
+
+
+def candidates_debug(result):
+    """Для администратора: какие страницы отобраны и почему."""
+    items = result.get("candidates") or result.get("evidence") or []
+    if not items:
+        return "🗂 Кандидатов не было."
+    lines = ["🗂 Кандидаты для сравнения (отбор по тексту):"]
+    for item in items:
+        why = "; ".join(item.get("why") or []) or "—"
+        score = f" · балл {item['score']}" if item.get("score") is not None else ""
+        lines.append(f"[{item['n']}] {item['document_code']} PDF {item['pdf_page']}{score} · {why}")
     return "\n".join(lines)
 
 
@@ -825,13 +928,17 @@ def cost_breakdown(db_path, attribution_id):
         "unknown": " (ответ не получен — возможно оплачено, учтено в бюджете)",
         "reserved": " (ещё выполняется — зарезервировано)",
     }
-    for kind, images, input_tokens, output_tokens, value, ok, state in rows:
+    for kind, images, input_tokens, output_tokens, value, ok, state, error, request in rows:
         total += value
         status = status_notes.get(state, "")
         lines.append(
             f"• {names.get(kind, kind)}: картинок {images}, вход {input_tokens}, "
             f"выход {output_tokens} токенов — {value:.5f} ${status}"
         )
+        if error:
+            lines.append(f"   ошибка: {error}")
+        if error and request:
+            lines.append(f"   запрос: {request}")
     lines.append(f"Итого: {total:.5f} $ за {len(rows)} вызов(а)")
     return "\n".join(lines)
 

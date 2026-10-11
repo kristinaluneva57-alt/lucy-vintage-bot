@@ -1112,8 +1112,9 @@ async def _attribution_and_report(message, context, item_code, user_id, card):
         await message.reply_text(chunk, reply_markup=markup if index == len(chunks) - 1 else None)
 
     if is_admin(user_id):
+        breakdown = await asyncio.to_thread(attribution.cost_breakdown, DB_PATH, attribution_id)
         await message.reply_text(
-            await asyncio.to_thread(attribution.cost_breakdown, DB_PATH, attribution_id)
+            (breakdown + "\n\n" + attribution.candidates_debug(result))[:3900]
         )
 
 
@@ -1136,7 +1137,7 @@ async def send_attribution_source(message, rest, user_id):
     storage_key, _ = await asyncio.to_thread(attribution._storage, DB_PATH, evidence["document_id"])
     caption = attribution.source_line(evidence)
     if evidence.get("verdict"):
-        caption += "\n" + attribution.VERDICT_LABELS[evidence["verdict"]]
+        caption += "\n" + attribution.verdict_label(evidence["verdict"])
     if evidence.get("piece_cell"):
         caption += f"\nУкрашение на странице: клетка {evidence['piece_cell']} (A–C слева направо, 1–3 сверху вниз)"
     try:
