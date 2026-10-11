@@ -13,8 +13,9 @@ from knowledge_bridge import (
 )
 from fact_extractor import extract_page_facts
 from ai_fact_extractor import extract_ai_facts, save_ai_facts
-from library_importer import OCR_LANGUAGES, reocr_document, list_documents
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
+
+from library_importer import OCR_LANGUAGES, reocr_document, list_documents
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
