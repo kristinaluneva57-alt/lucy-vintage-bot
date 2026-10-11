@@ -6,6 +6,10 @@ import time
 import library_search
 import library_ai
 import library_catalog
+import attribution
+import page_images
+import visual_ai
+import visual_index
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
@@ -699,6 +703,10 @@ async def show_item_card(message, item_code, user_id):
             callback_data=f"details:{item_code}"
         )],
         [InlineKeyboardButton(
+            "🔬 Исследовать по библиотеке",
+            callback_data=f"vattr:{item_code}"
+        )],
+        [InlineKeyboardButton(
             "✏️ Редактировать",
             callback_data=f"edit:{item_code}"
         )],
@@ -981,6 +989,189 @@ async def handle_edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Готово", callback_data=f"edit:{item_code}")
         ]]),
+    )
+
+
+# --- визуальная атрибуция по библиотеке ---
+
+def card_for_attribution(item_code, user_id):
+    """Поля и фото своей карточки для атрибуции. None — карточка не своя."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT front_photo, back_photo, mark_photo, details_photo, mark_text, notes
+            FROM items
+            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            """,
+            (item_code, user_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    front, back, mark, details, mark_text, notes = row
+    photos = [(label, file_id) for label, file_id in (
+        ("front", front), ("back", back), ("mark", mark), ("details", details)
+    ) if file_id]
+    for kind, file_id in get_item_photos(item_code):
+        photos.append(("mark" if kind == "mark" else "extra", file_id))
+    return {"photos": photos, "mark_text": mark_text, "notes": notes}
+
+
+async def download_photo(context, file_id):
+    telegram_file = await context.bot.get_file(file_id)
+    return bytes(await telegram_file.download_as_bytearray())
+
+
+async def attribution_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action, _, rest = query.data.partition(":")
+    user_id = update.effective_user.id
+
+    if action == "vattr":
+        await start_attribution(query.message, context, rest, user_id)
+    elif action == "vsrc":
+        await send_attribution_source(query.message, rest, user_id)
+    elif action == "vsave":
+        await save_attribution(query.message, rest, user_id)
+
+
+async def start_attribution(message, context, item_code, user_id):
+    card = await asyncio.to_thread(card_for_attribution, item_code, user_id)
+    if card is None:
+        await message.reply_text("Исследовать можно только свою карточку. 🔎")
+        return
+    if not card["photos"]:
+        await message.reply_text(
+            "В карточке нет фото. Добавь фото лицевой стороны и клейма: "
+            "✏️ Редактировать → 📸 Добавить фото."
+        )
+        return
+    if await asyncio.to_thread(attribution.running_for, DB_PATH, user_id):
+        await message.reply_text("🔬 Исследование уже идёт — дождись результата, пожалуйста.")
+        return
+
+    mode, reason = await asyncio.to_thread(
+        attribution.decide_mode, DB_PATH, user_id, is_admin(user_id)
+    )
+    if mode == "ai":
+        intro = (
+            "🔬 Начинаю исследование: опишу украшение, найду в книгах "
+            "страницы-кандидаты по тексту (подписи, клейма, описания) "
+            "и сравню их изображения с твоими фото. "
+            "Это займёт около минуты — Люся пока свободна для других дел."
+        )
+    else:
+        intro = (
+            f"🔎 {reason[:1].upper() + reason[1:]}. Ищу по книгам бесплатно — "
+            "по надписи клейма и описанию карточки, без ИИ-сравнения."
+        )
+    await message.reply_text(intro)
+    context.application.create_task(
+        _attribution_and_report(message, context, item_code, user_id, card)
+    )
+
+
+async def _attribution_and_report(message, context, item_code, user_id, card):
+    try:
+        photos = []
+        for label, file_id in card["photos"][:6]:
+            photos.append((label, await download_photo(context, file_id)))
+        attribution_id, result = await asyncio.to_thread(
+            attribution.run, DB_PATH, user_id, item_code, photos,
+            {"mark_text": card["mark_text"], "notes": card["notes"]}, is_admin(user_id),
+        )
+    except attribution.AlreadyRunning:
+        await message.reply_text("🔬 Исследование уже идёт — дождись результата, пожалуйста.")
+        return
+    except Exception as error:
+        print(f"attribution failed: {type(error).__name__}: {error}")
+        await message.reply_text(
+            "😔 Исследование не получилось довести до конца. Попробуй позже — "
+            "карточка не изменилась.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    report = attribution.format_report(result)
+    buttons = [
+        InlineKeyboardButton(f"🖼 Источник [{e['n']}]", callback_data=f"vsrc:{attribution_id}:{e['n']}")
+        for e in result.get("evidence", [])
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    if attribution.best_evidence(result):
+        rows.append([InlineKeyboardButton(
+            "💾 Сохранить в карточку", callback_data=f"vsave:{attribution_id}"
+        )])
+    markup = InlineKeyboardMarkup(rows) if rows else None
+
+    chunks = [report[i:i + 3800] for i in range(0, len(report), 3800)] or [report]
+    for index, chunk in enumerate(chunks):
+        await message.reply_text(chunk, reply_markup=markup if index == len(chunks) - 1 else None)
+
+    if is_admin(user_id):
+        await message.reply_text(
+            await asyncio.to_thread(attribution.cost_breakdown, DB_PATH, attribution_id)
+        )
+
+
+async def send_attribution_source(message, rest, user_id):
+    try:
+        attribution_id, number = (int(x) for x in rest.split(":"))
+    except ValueError:
+        return
+    record = await asyncio.to_thread(attribution.get_attribution, DB_PATH, attribution_id)
+    if not record or (record["user_id"] != user_id and not is_admin(user_id)):
+        await message.reply_text("Не нашла этот источник. 🔎")
+        return
+    evidence = next(
+        (e for e in (record["result"] or {}).get("evidence", []) if e["n"] == number), None
+    )
+    if evidence is None:
+        await message.reply_text("Не нашла этот источник. 🔎")
+        return
+
+    storage_key, _ = await asyncio.to_thread(attribution._storage, DB_PATH, evidence["document_id"])
+    caption = attribution.source_line(evidence)
+    if evidence.get("verdict"):
+        caption += "\n" + attribution.VERDICT_LABELS[evidence["verdict"]]
+    if evidence.get("piece_cell"):
+        caption += f"\nУкрашение на странице: клетка {evidence['piece_cell']} (A–C слева направо, 1–3 сверху вниз)"
+    try:
+        image = await asyncio.to_thread(
+            page_images.page_image, evidence["document_code"], storage_key, evidence["pdf_page"]
+        )
+        await message.reply_photo(photo=image, caption=caption[:1000])
+        if evidence.get("crop_cell"):
+            crop = await asyncio.to_thread(
+                page_images.crop_image, evidence["document_code"], storage_key,
+                evidence["pdf_page"], evidence["crop_cell"],
+            )
+            crop_caption = f"Увеличенная область {evidence['crop_cell']} — подпись/реклама"
+            if evidence.get("text_unreadable"):
+                crop_caption += "\nТекст прочитать уверенно не удалось."
+            await message.reply_photo(photo=crop, caption=crop_caption[:1000])
+    except Exception as error:
+        print(f"source image failed: {type(error).__name__}: {error}")
+        await message.reply_text(
+            f"Не получилось показать изображение страницы. Источник: {caption}"
+        )
+
+
+async def save_attribution(message, rest, user_id):
+    try:
+        attribution_id = int(rest)
+    except ValueError:
+        return
+    summary = await asyncio.to_thread(attribution.save_to_card, DB_PATH, attribution_id, user_id)
+    if summary is None:
+        await message.reply_text("Сохранить нельзя: нет подтверждённого совпадения или карточка не твоя.")
+        return
+    await message.reply_text(
+        f"💾 Сохранила в карточку:\n{summary}\n\nСтатус атрибуции в карточке обновлён.",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -2542,6 +2733,92 @@ async def _fill_hashes_and_report(message):
     await message.reply_text(text + "\nРезультат проверки: /dupes")
 
 
+@admin_only
+async def vindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.lower() for a in (context.args or [])]
+    if not args:
+        stats = await asyncio.to_thread(visual_index.index_stats, DB_PATH)
+        await update.message.reply_text(
+            "🗂 ИНДЕКС ДЛЯ ВИЗУАЛЬНОЙ АТРИБУЦИИ (бесплатно, без ИИ)\n\n"
+            f"Книг: {stats['books']} · проиндексировано: {stats['indexed']}\n"
+            f"Страниц в индексе: {stats['pages']} · реклама/каталог: {stats['ads']} · "
+            f"с иллюстрациями: {stats['illustrated']}\n\n"
+            "/vindex all — проиндексировать книги без индекса\n"
+            "/vindex DOC-000007 — одну книгу заново\n"
+            "Добавь pdf, чтобы учесть картинки в PDF (книга скачивается из R2)."
+        )
+        return
+    use_pdf = "pdf" in args
+    target = args[0].upper()
+    if target == "ALL":
+        targets = await asyncio.to_thread(visual_index.books_to_index, DB_PATH)
+    else:
+        document = await asyncio.to_thread(library_catalog.get_document, target)
+        if document is None:
+            await update.message.reply_text(f"❌ Документ {target} не найден. Список — /books")
+            return
+        targets = [(document[0], document[1])]
+    if not targets:
+        await update.message.reply_text("Все книги уже в индексе. ✨")
+        return
+    await update.message.reply_text(
+        f"🗂 Индексирую {len(targets)} книг(и) в фоне. Это бесплатно: используется "
+        "уже распознанный текст. Напишу, когда закончу."
+    )
+    context.application.create_task(_vindex_and_report(update.message, targets, use_pdf))
+
+
+async def _vindex_and_report(message, targets, use_pdf):
+    done, failed = [], []
+    for document_id, code in targets:
+        try:
+            pdf = None
+            if use_pdf:
+                storage_key, _ = await asyncio.to_thread(attribution._storage, DB_PATH, document_id)
+                pdf = await asyncio.to_thread(page_images.pdf_path, code, storage_key)
+            pages = await asyncio.to_thread(visual_index.index_document, DB_PATH, document_id, pdf)
+            done.append(f"{code} ({pages} стр.)")
+        except Exception as error:
+            print(f"vindex failed for {code}: {type(error).__name__}: {error}")
+            failed.append(code)
+    text = "✅ Индекс готов: " + (", ".join(done) or "—")
+    if failed:
+        text += "\n❌ Не получилось: " + ", ".join(failed)
+    await message.reply_text(text)
+
+
+@admin_only
+async def vstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = await asyncio.to_thread(visual_ai.stats, DB_PATH)
+    names = {"describe": "описание фото", "compare": "сравнение", "read_text": "чтение мелкого текста"}
+    lines = [
+        "💵 РАСХОДЫ НА ВИЗУАЛЬНУЮ АТРИБУЦИЮ",
+        f"Режим: {visual_ai.mode()} · бесплатно в месяц: {visual_ai.free_per_month()}",
+        "",
+        f"Сегодня: {stats['day_cost']:.4f} $ оплачено"
+        f" + {stats['day_possible']:.4f} $ возможно"
+        f" + {stats['day_reserved']:.4f} $ в работе"
+        f" из {stats['budget_day']:.2f} $ · запросов: {stats['day_calls']}",
+        f"Месяц: {stats['month_cost']:.4f} $ оплачено"
+        f" + {stats['month_possible']:.4f} $ возможно"
+        f" + {stats['month_reserved']:.4f} $ в работе"
+        f" из {stats['budget_month']:.2f} $ · запросов: {stats['month_calls']}",
+        f"Ошибок OpenAI (не оплачено): {stats['month_failed']} · без ответа (учтены как "
+        f"возможные расходы): {stats['month_unknown']} · выполняются сейчас: {stats['month_in_flight']}",
+        f"Токены за месяц: вход {stats['month_input']}, выход {stats['month_output']}",
+        f"Атрибуций с ИИ за месяц: {stats['attributions']} · "
+        f"средняя стоимость: {stats['avg_cost']:.4f} $ · запросов на атрибуцию: {stats['avg_calls']:.1f}",
+    ]
+    if stats["by_kind"]:
+        lines += ["", "По видам запросов (месяц):"]
+        for kind, count, value, input_tokens, output_tokens in stats["by_kind"]:
+            lines.append(
+                f"• {names.get(kind, kind)}: {count} шт · {value:.4f} $ · "
+                f"вход {input_tokens} / выход {output_tokens}"
+            )
+    await update.message.reply_text("\n".join(lines))
+
+
 # --- команды, набранные текстом ---
 # Telegram помечает команду только если «/» стоит в самом начале и
 # в имени только латиница. «/ books», « /books», «/bооks» с русской «о»
@@ -2561,6 +2838,8 @@ def text_commands():
         "fixmeta": fixmeta_command,
         "settitle": settitle_command,
         "dupes": dupes_command,
+        "vindex": vindex_command,
+        "vstats": vstats_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -2590,7 +2869,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook"
+            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -2614,6 +2893,7 @@ def main():
     init_knowledge_bridge()
     lucy_ai.init_ai_usage_table(DB_PATH)
     library_ai.init_tables(DB_PATH)
+    attribution.init_tables(DB_PATH)
     seed_books()
     seed_knowledge()
     app = Application.builder().token(TOKEN).build()
@@ -2634,12 +2914,15 @@ def main():
     app.add_handler(CommandHandler("fixmeta", fixmeta_command))
     app.add_handler(CommandHandler("settitle", settitle_command))
     app.add_handler(CommandHandler("dupes", dupes_command))
+    app.add_handler(CommandHandler("vindex", vindex_command))
+    app.add_handler(CommandHandler("vstats", vstats_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
+    app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vattr|vsrc|vsave):"))
     app.add_handler(
         MessageHandler(
             filters.Document.ALL,

@@ -502,6 +502,7 @@ def import_pdf_with_ocr(
             )
             result["created"] = created
             result.update(_detect_metadata_safely(document_id))
+            _visual_index_safely(document_id, local_path)
             return result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -518,6 +519,19 @@ def metadata_lines(result):
             f"Задать вручную: /settitle {result['document_code']} Название | Автор\n"
         )
     return lines
+
+
+def _visual_index_safely(document_id, pdf_path):
+    """После OCR строит бесплатный индекс страниц для визуальной атрибуции.
+    PDF уже скачан для импорта — повторно ничего не загружается."""
+    try:
+        import library_db
+        import visual_index
+
+        visual_index.init_tables(library_db.DB_PATH)
+        visual_index.index_document(library_db.DB_PATH, document_id, pdf_path)
+    except Exception as error:
+        print(f"visual index failed: {type(error).__name__}: {error}")
 
 
 def _detect_metadata_safely(document_id):
@@ -598,6 +612,7 @@ def reocr_document(document_code, language, force_ocr=False):
             )
             result["title"] = title
             result.update(_detect_metadata_safely(document_id))
+            _visual_index_safely(document_id, local_path)
             return result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
