@@ -115,6 +115,7 @@ def init_db():
         ("mark_photo", "TEXT"),
         ("details_photo", "TEXT"),
         ("owner_user_id", "INTEGER"),
+        ("deleted_at", "TEXT"),
     ]
 
     existing_columns = {
@@ -378,7 +379,33 @@ def admin_only(handler):
 
 
 # Старые находки без владельца видит только администратор.
-OWNER_FILTER = "(owner_user_id = ? OR (owner_user_id IS NULL AND ?))"
+# Удалённые пользователем карточки (deleted_at) не показываются,
+# но остаются в базе — администратор может их восстановить.
+OWNER_FILTER = (
+    "(owner_user_id = ? OR (owner_user_id IS NULL AND ?))"
+    " AND deleted_at IS NULL"
+)
+
+
+def delete_item(item_code, user_id):
+    """Прячет карточку владелицы. Чужие и старые карточки без владельца
+    удалить нельзя. Возвращает True, если карточка удалена."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE items
+            SET deleted_at = datetime('now')
+            WHERE item_code = ?
+              AND owner_user_id = ?
+              AND deleted_at IS NULL
+            """,
+            (item_code, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
 
 
 def get_items(user_id):
@@ -468,13 +495,62 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(
             "🔬 Клеймо и детали",
             callback_data=f"details:{item_code}"
-        )]
+        )],
+        [InlineKeyboardButton(
+            "🗑 Удалить карточку",
+            callback_data=f"del:{item_code}"
+        )],
     ])
     
     await query.message.reply_text(
         card,
         reply_markup=details_keyboard
     )
+async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action, item_code = query.data.split(":", 1)
+    user_id = update.effective_user.id
+
+    if action == "del":
+        if not get_item(item_code, user_id):
+            await query.message.reply_text("Не смогла найти эту карточку. 🔎")
+            return
+        await query.message.reply_text(
+            f"🗑 Удалить карточку {item_code} из шкатулки?\n\n"
+            "Фото и все записи этой находки пропадут из шкатулки.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Да, удалить", callback_data=f"delok:{item_code}")],
+                [InlineKeyboardButton("Нет, оставить", callback_data=f"delno:{item_code}")],
+            ]),
+        )
+        return
+
+    if action == "delno":
+        await query.message.reply_text(
+            f"Хорошо, {item_code} остаётся в шкатулке. 💎",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    if action == "delok":
+        try:
+            deleted = delete_item(item_code, user_id)
+        except Exception as error:
+            print(f"delete_item failed: {type(error).__name__}: {error}")
+            await query.message.reply_text(
+                "😔 Не получилось удалить карточку. Попробуй чуть позже.",
+                reply_markup=main_keyboard(),
+            )
+            return
+        if deleted:
+            text = f"🗑 Карточка {item_code} удалена из шкатулки."
+        else:
+            text = "Эту карточку удалить нельзя — она уже удалена или не твоя. 🔎"
+        await query.message.reply_text(text, reply_markup=main_keyboard())
+
+
 async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1382,6 +1458,7 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
+    app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(
         MessageHandler(
