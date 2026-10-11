@@ -432,7 +432,7 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"Итого: {expected:.5f} $ за 2 вызов(а)", breakdown)
 
         stats = texts(await self.admin.say("/vstats"))[0]
-        self.assertIn(f"Месяц: {expected:.4f} $", stats)
+        self.assertIn(f"Месяц: {expected:.4f} $ оплачено + 0.0000 $ возможно + 0.0000 $ в работе", stats)
         self.assertIn("Атрибуций с ИИ за месяц: 1", stats)
         self.assertIn(f"средняя стоимость: {expected:.4f} $", stats)
         self.assertIn("запросов на атрибуцию: 2.0", stats)
@@ -575,6 +575,242 @@ class VisualAttributionTest(unittest.IsolatedAsyncioTestCase):
         replies = await self.admin.run_tasks()
         self.assertIn("DOC-000007 (182 стр.)", texts(replies)[0])
         self.assertIn("только администратору", texts(await self.owner.say("/vindex"))[0])
+
+
+
+class SlowOpenAI(FakeOpenAI):
+    """Как FakeOpenAI, но каждый ответ «думает» 0,2 с — для гонок."""
+
+    def _create(self, **kwargs):
+        import time
+
+        time.sleep(0.2)
+        return super()._create(**kwargs)
+
+
+class NoResponseError(openai_module.APITimeoutError):
+    def __init__(self):
+        Exception.__init__(self, "timeout sk-SECRET")
+
+
+class BudgetConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """Бюджет и месячный лимит при одновременных запросах."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(prefix="lucy_test_"), "test.db")
+        visual_ai.init_tables(self.path)
+        patches = [
+            mock.patch.object(openai_module, "OpenAI", SlowOpenAI, create=True),
+            mock.patch.dict(os.environ, {
+                "OPENAI_API_KEY": "sk-test",
+                "LUCY_VISUAL_BUDGET_DAY_USD": "1",
+                "LUCY_VISUAL_BUDGET_MONTH_USD": "10",
+                "LUCY_VISUAL_MODE": "all",
+                "LUCY_VISUAL_FREE_PER_MONTH": "1",
+            }),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        FakeOpenAI.calls = []
+        FakeOpenAI.error = None
+        FakeOpenAI.read_answer = {"text": "x", "legible": False, "set_name": None, "years": [], "unclear": ""}
+
+    def rows(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            return conn.execute(
+                "SELECT status, cost_usd, reserved_usd, input_tokens, output_tokens, error "
+                "FROM visual_ai_calls ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def read_call(self):
+        """Платный вызов «чтение текста»: 2 картинки, ответ до 500 токенов."""
+        return visual_ai.call_json(
+            self.path, kind="read_text", system=attribution.READ_SYSTEM,
+            content=[{"type": "text", "text": "Cropped area:"}], images=2, max_tokens=500,
+        )
+
+    def estimate(self):
+        text = len(attribution.READ_SYSTEM) + len("Cropped area:")
+        return visual_ai.estimate_cost(2, text, 500)
+
+    def run_threads(self, target, count):
+        import threading
+
+        barrier = threading.Barrier(count)
+        outcomes = []
+        lock = threading.Lock()
+
+        def worker():
+            barrier.wait()
+            try:
+                value = target()
+                outcome = ("ok", value)
+            except Exception as error:  # noqa: BLE001
+                outcome = (type(error).__name__, None)
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=worker) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        return outcomes
+
+    # --- резервирование ---
+
+    def test_concurrent_reservations_never_exceed_budget(self):
+        os.environ["LUCY_VISUAL_BUDGET_DAY_USD"] = "0.01"
+        outcomes = self.run_threads(
+            lambda: visual_ai.reserve(self.path, kind="compare", images=4, estimate=0.003), 20
+        )
+        self.assertEqual(sum(1 for kind, _ in outcomes if kind == "ok"), 3)
+        self.assertEqual(sum(1 for kind, _ in outcomes if kind == "BudgetExceeded"), 17)
+        self.assertLessEqual(visual_ai.reserved(self.path, "day"), 0.01)
+
+    def test_concurrent_api_calls_respect_budget(self):
+        estimate = self.estimate()
+        os.environ["LUCY_VISUAL_BUDGET_DAY_USD"] = f"{estimate * 2 + estimate / 2:.8f}"
+        outcomes = self.run_threads(self.read_call, 8)
+        self.assertEqual(sum(1 for kind, _ in outcomes if kind == "ok"), 2)
+        self.assertEqual(len(FakeOpenAI.calls), 2)  # остальные остановлены ДО запроса
+        self.assertLessEqual(visual_ai.spent(self.path, "day"), visual_ai.budget_day())
+        self.assertEqual(visual_ai.reserved(self.path, "day"), 0)
+
+    def test_settle_replaces_reserve_with_actual_cost(self):
+        self.read_call()
+        status, cost_usd, reserved_usd, tokens_in, tokens_out, _ = self.rows()[0]
+        self.assertEqual(status, "done")
+        self.assertEqual(reserved_usd, 0)
+        self.assertEqual((tokens_in, tokens_out), (3100, 150))
+        self.assertAlmostEqual(cost_usd, (3100 * 0.40 + 150 * 1.60) / 1e6, places=10)
+
+    def test_error_with_response_releases_reserve(self):
+        error = openai_module.OpenAIError("bad request sk-SECRET")
+        error.code = "invalid_request"
+        FakeOpenAI.error = error
+        with self.assertRaises(visual_ai.VisualAIUnavailable):
+            self.read_call()
+        status, cost_usd, reserved_usd, _, _, saved_error = self.rows()[0]
+        self.assertEqual((status, cost_usd, reserved_usd), ("failed", 0, 0))
+        self.assertIn("invalid_request", saved_error)
+        self.assertNotIn("SECRET", saved_error)
+        self.assertEqual(visual_ai.spent(self.path, "day"), 0)
+
+    def test_no_response_counts_possible_cost(self):
+        FakeOpenAI.error = NoResponseError()
+        with self.assertRaises(visual_ai.VisualAIUnavailable):
+            self.read_call()
+        status, cost_usd, reserved_usd, _, _, saved_error = self.rows()[0]
+        self.assertEqual(status, "unknown")
+        self.assertAlmostEqual(cost_usd, self.estimate(), places=10)
+        self.assertEqual(reserved_usd, 0)
+        self.assertIn("ответ не получен", saved_error)
+        self.assertNotIn("SECRET", saved_error)
+        # Возможный расход учитывается в бюджете.
+        self.assertAlmostEqual(visual_ai.spent(self.path, "day"), self.estimate(), places=10)
+        os.environ["LUCY_VISUAL_BUDGET_DAY_USD"] = f"{self.estimate() * 1.5:.8f}"
+        FakeOpenAI.error = None
+        with self.assertRaises(visual_ai.BudgetExceeded):
+            self.read_call()
+
+    def test_stale_reservation_still_counts(self):
+        call_id = visual_ai.reserve(self.path, kind="compare", images=4, estimate=0.004)
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE visual_ai_calls SET created_at = ? WHERE id = ?",
+                     ((visual_ai._now() - __import__("datetime").timedelta(hours=1))
+                      .isoformat(timespec="seconds"), call_id))
+        conn.commit()
+        conn.close()
+        # Переход через полночь UTC не важен для теста: считаем месяц.
+        stats = visual_ai.stats(self.path)
+        self.assertEqual(self.rows()[0][0], "unknown")
+        self.assertAlmostEqual(stats["month_possible"], 0.004)
+        self.assertEqual(stats["month_reserved"], 0)
+
+    async def test_vstats_shows_spent_possible_and_reserved(self):
+        bot.DB_PATH = self.path
+        attribution.init_tables(self.path)
+        self.read_call()                                  # оплачено
+        FakeOpenAI.error = NoResponseError()
+        with self.assertRaises(visual_ai.VisualAIUnavailable):
+            self.read_call()                              # возможно оплачено
+        FakeOpenAI.error = None
+        visual_ai.reserve(self.path, kind="compare", images=4, estimate=0.0123)  # в работе
+
+        chat = FakeChat(bot, ADMIN)
+        text = texts(await chat.say("/vstats"))[0]
+        paid = (3100 * 0.40 + 150 * 1.60) / 1e6
+        self.assertIn(f"Месяц: {paid:.4f} $ оплачено + {self.estimate():.4f} $ возможно + 0.0123 $ в работе", text)
+        self.assertIn("без ответа (учтены как возможные расходы): 1", text)
+        self.assertIn("выполняются сейчас: 1", text)
+        self.assertIn("запросов: 3", text)
+
+    # --- месячный лимит ---
+
+    def test_parallel_starts_get_one_slot(self):
+        attribution.init_tables(self.path)
+        outcomes = self.run_threads(
+            lambda: attribution.start_slot(self.path, OWNER, "OMG-000001", "h", False), 10
+        )
+        started = [value for kind, value in outcomes if kind == "ok"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(sum(1 for kind, _ in outcomes if kind == "AlreadyRunning"), 9)
+        self.assertEqual(started[0][1], "ai")
+
+    def test_running_slot_counts_toward_quota(self):
+        attribution.init_tables(self.path)
+        first_id, mode, _ = attribution.start_slot(self.path, OWNER, "OMG-000001", "h1", False)
+        self.assertEqual(mode, "ai")
+        # Первое исследование ещё идёт — лимит 1 уже занят.
+        self.assertEqual(attribution.paid_this_month(self.path, OWNER), 1)
+        attribution._finish(self.path, first_id, {}, "ai", paid=True)
+        second_id, mode, reason = attribution.start_slot(self.path, OWNER, "OMG-000002", "h2", False)
+        self.assertEqual(mode, "free")
+        self.assertIn("закончились", reason)
+
+    def test_aborted_attempt_returns_slot(self):
+        attribution.init_tables(self.path)
+        first_id, _, _ = attribution.start_slot(self.path, OWNER, "OMG-000001", "h1", False)
+        attribution._finish(self.path, first_id, {}, "free", paid=False)  # бюджет оборвал
+        _, mode, _ = attribution.start_slot(self.path, OWNER, "OMG-000002", "h2", False)
+        self.assertEqual(mode, "ai")
+
+    def test_admin_parallel_runs_also_serialized(self):
+        attribution.init_tables(self.path)
+        outcomes = self.run_threads(
+            lambda: attribution.start_slot(self.path, ADMIN, "OMG-000002", "h", True), 5
+        )
+        self.assertEqual(sum(1 for kind, _ in outcomes if kind == "ok"), 1)
+
+
+class ConcurrentBotRunsTest(unittest.IsolatedAsyncioTestCase):
+    """Два нажатия «Исследовать» подряд: второе не обходит лимит."""
+
+    setUp = VisualAttributionTest.setUp
+    fake_render = VisualAttributionTest.fake_render
+    chat = VisualAttributionTest.chat
+
+    async def test_double_press_runs_once(self):
+        os.environ["LUCY_VISUAL_FREE_PER_MONTH"] = "1"
+        with mock.patch.object(openai_module, "OpenAI", SlowOpenAI, create=True):
+            await self.owner.press("vattr:OMG-000001")
+            await self.owner.press("vattr:OMG-000001")
+            tasks = list(self.owner.tasks)
+            self.owner.tasks.clear()
+            start = len(self.owner.sent)
+            import asyncio
+
+            await asyncio.gather(*tasks)
+        replies = texts(self.owner.sent[start:])
+        self.assertEqual(sum(1 for r in replies if "уже идёт" in r), 1)
+        self.assertEqual(sum(1 for r in replies if "ИССЛЕДОВАНИЕ ПО БИБЛИОТЕКЕ" in r), 1)
+        self.assertEqual([c["kind"] for c in FakeOpenAI.calls].count("describe"), 1)
+        self.assertEqual(attribution.paid_this_month(bot.DB_PATH, OWNER), 1)
 
 
 if __name__ == "__main__":

@@ -108,7 +108,15 @@ def _stub_missing_modules():
             def __init__(self, *args, **kwargs):
                 raise OpenAIError("openai не установлен")
 
+        class APIConnectionError(OpenAIError):
+            pass
+
+        class APITimeoutError(APIConnectionError):
+            pass
+
         openai.OpenAIError = OpenAIError
+        openai.APIConnectionError = APIConnectionError
+        openai.APITimeoutError = APITimeoutError
         openai.OpenAI = OpenAI
         sys.modules["openai"] = openai
     if missing("flask"):

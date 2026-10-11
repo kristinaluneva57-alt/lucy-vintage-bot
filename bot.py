@@ -1058,8 +1058,9 @@ async def start_attribution(message, context, item_code, user_id):
     )
     if mode == "ai":
         intro = (
-            "🔬 Начинаю исследование по всей библиотеке: опишу украшение, "
-            "найду страницы-кандидаты и сравню их с твоими фото. "
+            "🔬 Начинаю исследование: опишу украшение, найду в книгах "
+            "страницы-кандидаты по тексту (подписи, клейма, описания) "
+            "и сравню их изображения с твоими фото. "
             "Это займёт около минуты — Люся пока свободна для других дел."
         )
     else:
@@ -1082,6 +1083,9 @@ async def _attribution_and_report(message, context, item_code, user_id, card):
             attribution.run, DB_PATH, user_id, item_code, photos,
             {"mark_text": card["mark_text"], "notes": card["notes"]}, is_admin(user_id),
         )
+    except attribution.AlreadyRunning:
+        await message.reply_text("🔬 Исследование уже идёт — дождись результата, пожалуйста.")
+        return
     except Exception as error:
         print(f"attribution failed: {type(error).__name__}: {error}")
         await message.reply_text(
@@ -2791,8 +2795,16 @@ async def vstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💵 РАСХОДЫ НА ВИЗУАЛЬНУЮ АТРИБУЦИЮ",
         f"Режим: {visual_ai.mode()} · бесплатно в месяц: {visual_ai.free_per_month()}",
         "",
-        f"Сегодня: {stats['day_cost']:.4f} $ из {stats['budget_day']:.2f} $ · запросов: {stats['day_calls']}",
-        f"Месяц: {stats['month_cost']:.4f} $ из {stats['budget_month']:.2f} $ · запросов: {stats['month_calls']}",
+        f"Сегодня: {stats['day_cost']:.4f} $ оплачено"
+        f" + {stats['day_possible']:.4f} $ возможно"
+        f" + {stats['day_reserved']:.4f} $ в работе"
+        f" из {stats['budget_day']:.2f} $ · запросов: {stats['day_calls']}",
+        f"Месяц: {stats['month_cost']:.4f} $ оплачено"
+        f" + {stats['month_possible']:.4f} $ возможно"
+        f" + {stats['month_reserved']:.4f} $ в работе"
+        f" из {stats['budget_month']:.2f} $ · запросов: {stats['month_calls']}",
+        f"Ошибок OpenAI (не оплачено): {stats['month_failed']} · без ответа (учтены как "
+        f"возможные расходы): {stats['month_unknown']} · выполняются сейчас: {stats['month_in_flight']}",
         f"Токены за месяц: вход {stats['month_input']}, выход {stats['month_output']}",
         f"Атрибуций с ИИ за месяц: {stats['attributions']} · "
         f"средняя стоимость: {stats['avg_cost']:.4f} $ · запросов на атрибуцию: {stats['avg_calls']:.1f}",

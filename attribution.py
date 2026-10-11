@@ -1,4 +1,9 @@
-"""Визуальная атрибуция украшения по всей библиотеке.
+"""Визуальная атрибуция украшения по библиотеке (первая версия).
+
+Важно: это НЕ визуальный поиск по всем изображениям библиотеки.
+Страницы-кандидаты отбираются по тексту (OCR, подписи, марки), и только
+они сравниваются с фото по изображению. Иллюстрация без текста рядом
+может не попасть в кандидаты.
 
 Поток одной атрибуции (запускается в фоне):
 1. Кэш: те же фото при том же состоянии индекса → готовый результат, 0 $.
@@ -176,15 +181,28 @@ def photos_hash(photos, version):
     return digest.hexdigest()
 
 
-def paid_this_month(db_path, user_id):
+class AlreadyRunning(Exception):
+    pass
+
+
+_USED_SLOTS = """
+    SELECT COUNT(*) FROM visual_attributions
+    WHERE user_id = ? AND created_at LIKE ?
+      AND (paid = 1 OR (status = 'running' AND mode = 'ai' AND created_at >= ?))
+"""
+
+
+def _used_slots(conn, user_id):
     month = _now().strftime("%Y-%m")
-    conn = sqlite3.connect(db_path)
+    fresh = (_now() - RUNNING_TIMEOUT).isoformat(timespec="seconds")
+    return conn.execute(_USED_SLOTS, (user_id, month + "%", fresh)).fetchone()[0]
+
+
+def paid_this_month(db_path, user_id):
+    """Использованные ИИ-попытки месяца: завершённые с оплатой + идущие сейчас."""
+    conn = sqlite3.connect(db_path, timeout=visual_ai.DB_TIMEOUT)
     try:
-        return conn.execute(
-            "SELECT COUNT(*) FROM visual_attributions "
-            "WHERE user_id = ? AND paid = 1 AND created_at LIKE ?",
-            (user_id, month + "%"),
-        ).fetchone()[0]
+        return _used_slots(conn, user_id)
     finally:
         conn.close()
 
@@ -330,19 +348,57 @@ def materials_in(*texts):
 
 # --- основной поток ---
 
-def decide_mode(db_path, user_id, is_admin):
-    """('ai', None) или ('free', причина)."""
+def _mode_for(used, is_admin):
     current = visual_ai.mode()
     if current == "off":
         return "free", "ИИ-сравнение сейчас выключено"
     if current == "admin" and not is_admin:
         return "free", "ИИ-сравнение пока доступно только в тестовом режиме"
-    if not is_admin and paid_this_month(db_path, user_id) >= visual_ai.free_per_month():
+    if not is_admin and used >= visual_ai.free_per_month():
         return "free", (
             f"бесплатные ИИ-исследования на этот месяц закончились "
             f"({visual_ai.free_per_month()} в месяц)"
         )
     return "ai", None
+
+
+def start_slot(db_path, user_id, item_code, digest, is_admin):
+    """Атомарно занимает слот исследования: проверка «уже идёт» и месячного
+    лимита и вставка записи — в одной транзакции BEGIN IMMEDIATE.
+    Два одновременных запуска не могут оба получить последнюю попытку.
+    Возвращает (attribution_id, mode, reason)."""
+    conn = visual_ai._connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            fresh = (_now() - RUNNING_TIMEOUT).isoformat(timespec="seconds")
+            if conn.execute(
+                "SELECT 1 FROM visual_attributions "
+                "WHERE user_id = ? AND status = 'running' AND created_at >= ?",
+                (user_id, fresh),
+            ).fetchone():
+                raise AlreadyRunning()
+            mode, reason = _mode_for(_used_slots(conn, user_id), is_admin)
+            cursor = conn.execute(
+                """
+                INSERT INTO visual_attributions
+                    (user_id, item_code, photos_hash, mode, status, created_at)
+                VALUES (?, ?, ?, ?, 'running', ?)
+                """,
+                (user_id, item_code, digest, mode, _now().isoformat(timespec="seconds")),
+            )
+            conn.execute("COMMIT")
+            return cursor.lastrowid, mode, reason
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def decide_mode(db_path, user_id, is_admin):
+    """('ai', None) или ('free', причина) — для подсказки до запуска."""
+    return _mode_for(paid_this_month(db_path, user_id), is_admin)
 
 
 def card_terms(card):
@@ -368,17 +424,17 @@ def run(db_path, user_id, item_code, photos, card, is_admin=False):
     version = library_version(db_path)
     digest = photos_hash(photos, version)
 
-    mode, reason = decide_mode(db_path, user_id, is_admin)
-    if mode == "ai":
-        cached = find_cached(db_path, digest)
-        if cached:
-            source_id, result = cached
-            result = dict(result, from_cache=True)
-            attribution_id = _insert(db_path, user_id, item_code, digest, "ai",
-                                     cached_from=source_id, result=result, status="done")
-            return attribution_id, result
+    # Готовый результат по тем же фото — бесплатно, попытку не списывает.
+    allowed = visual_ai.mode() == "all" or (visual_ai.mode() == "admin" and is_admin)
+    cached = find_cached(db_path, digest) if allowed else None
+    if cached:
+        source_id, result = cached
+        result = dict(result, from_cache=True)
+        attribution_id = _insert(db_path, user_id, item_code, digest, "ai",
+                                 cached_from=source_id, result=result, status="done")
+        return attribution_id, result
 
-    attribution_id = _insert(db_path, user_id, item_code, digest, mode)
+    attribution_id, mode, reason = start_slot(db_path, user_id, item_code, digest, is_admin)
     paid = False
     try:
         if mode == "ai":
@@ -763,9 +819,15 @@ def cost_breakdown(db_path, attribution_id):
     names = {"describe": "описание фото", "compare": "сравнение со страницами", "read_text": "чтение мелкого текста"}
     lines = ["💵 Расходы этой атрибуции:"]
     total = 0.0
-    for kind, images, input_tokens, output_tokens, value, ok in rows:
+    status_notes = {
+        "done": "",
+        "failed": " (ошибка OpenAI — не оплачено)",
+        "unknown": " (ответ не получен — возможно оплачено, учтено в бюджете)",
+        "reserved": " (ещё выполняется — зарезервировано)",
+    }
+    for kind, images, input_tokens, output_tokens, value, ok, state in rows:
         total += value
-        status = "" if ok else " (ошибка, не оплачено)"
+        status = status_notes.get(state, "")
         lines.append(
             f"• {names.get(kind, kind)}: картинок {images}, вход {input_tokens}, "
             f"выход {output_tokens} токенов — {value:.5f} ${status}"
