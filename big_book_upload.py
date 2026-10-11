@@ -226,9 +226,6 @@ async function uploadBook() {
       language: document.getElementById("language").value
     });
 
-      size: file.size
-    });
-
     status("Загружаю PDF напрямую в R2. Не закрывай страницу...");
 
     const uploaded = await fetch(prepared.upload_url, {
