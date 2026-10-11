@@ -16,6 +16,7 @@
 import base64
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -128,6 +129,7 @@ def init_tables(db_path):
             ("reserved_usd", "REAL DEFAULT 0"),
             ("error", "TEXT"),
             ("finished_at", "TEXT"),
+            ("request_info", "TEXT"),
         ):
             if column not in existing:
                 conn.execute(f"ALTER TABLE visual_ai_calls ADD COLUMN {column} {definition}")
@@ -193,7 +195,7 @@ def _expire_stale(conn):
     )
 
 
-def reserve(db_path, *, kind, images, estimate, attribution_id=None, user_id=None):
+def reserve(db_path, *, kind, images, estimate, attribution_id=None, user_id=None, request_info=None):
     """Атомарно резервирует оценку стоимости вызова. Возвращает id резерва.
 
     BEGIN IMMEDIATE блокирует запись в базу для других соединений на время
@@ -221,11 +223,11 @@ def reserve(db_path, *, kind, images, estimate, attribution_id=None, user_id=Non
                 """
                 INSERT INTO visual_ai_calls (
                     attribution_id, user_id, kind, model, images, status,
-                    reserved_usd, cost_usd, ok, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, 0, 0, ?)
+                    reserved_usd, cost_usd, ok, created_at, request_info
+                ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, 0, 0, ?, ?)
                 """,
                 (attribution_id, user_id, kind, MODEL, images, estimate,
-                 _now().isoformat(timespec="seconds")),
+                 _now().isoformat(timespec="seconds"), request_info),
             )
             conn.execute("COMMIT")
             return cursor.lastrowid
@@ -303,7 +305,8 @@ def calls_for(db_path, attribution_id):
     try:
         return conn.execute(
             """
-            SELECT kind, images, input_tokens, output_tokens, cost_usd, ok, status
+            SELECT kind, images, input_tokens, output_tokens, cost_usd, ok, status,
+                   error, request_info
             FROM visual_ai_calls WHERE attribution_id = ? ORDER BY id
             """,
             (attribution_id,),
@@ -390,6 +393,41 @@ def image_part(jpeg_bytes, detail="high"):
     }
 
 
+_SECRET = re.compile(r"(sk-[A-Za-z0-9_\-]{4,}|data:image/[^\s'\"]{20,}|[A-Za-z0-9+/]{80,}={0,2})")
+
+
+def scrub(text, limit=240):
+    """Убирает из текста ошибки ключи и куски изображений."""
+    return _SECRET.sub("[скрыто]", str(text or ""))[:limit]
+
+
+def describe_error(error):
+    """Безопасная диагностика ошибки OpenAI: тип, HTTP-статус, код, параметр."""
+    parts = [type(error).__name__]
+    status = getattr(error, "status_code", None)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    for attribute in ("type", "code", "param"):
+        value = getattr(error, attribute, None)
+        if value:
+            parts.append(f"{attribute}={value}")
+    message = getattr(error, "message", None) or (error.args[0] if error.args else "")
+    if message:
+        parts.append(scrub(message))
+    return " · ".join(parts)
+
+
+def request_summary(kind, images, content, system, max_tokens):
+    """Размер и формат запроса — без содержимого."""
+    payload = len(system) + sum(
+        len(p.get("text", "")) + len((p.get("image_url") or {}).get("url", "")) for p in content
+    )
+    return (
+        f"kind={kind} model={MODEL} images={images} "
+        f"payload_kb={payload // 1024} max_tokens={max_tokens} format=json_object"
+    )
+
+
 def _no_response_errors(openai):
     """Ошибки, при которых ответа от OpenAI не было (запрос мог быть оплачен)."""
     names = ("APITimeoutError", "APIConnectionError")
@@ -407,11 +445,18 @@ def call_json(db_path, *, kind, system, content, images, max_tokens,
     if not api_key:
         raise VisualAIUnavailable("no_key")
 
+    # JSON-режим OpenAI требует слово «JSON» в сообщениях, иначе ошибка 400
+    # (так упало сравнение в первом тесте на Railway). Проверяем сами.
+    texts_lower = (system + " ".join(p.get("text", "") for p in content)).lower()
+    if "json" not in texts_lower:
+        system = system + "\nRespond with a single JSON object."
+
     text_chars = len(system) + sum(len(p.get("text", "")) for p in content if p.get("type") == "text")
     estimate = estimate_cost(images, text_chars, max_tokens)
     call_id = reserve(
         db_path, kind=kind, images=images, estimate=estimate,
         attribution_id=attribution_id, user_id=user_id,
+        request_info=request_summary(kind, images, content, system, max_tokens),
     )
 
     import openai
@@ -429,13 +474,15 @@ def call_json(db_path, *, kind, system, content, images, max_tokens,
             response_format={"type": "json_object"},
         )
     except _no_response_errors(openai) as error:
-        print(f"Visual AI no response: {type(error).__name__}")
-        release(db_path, call_id, f"{type(error).__name__}: ответ не получен", response_received=False)
+        details = describe_error(error) + " · ответ не получен"
+        print(f"Visual AI no response: {details}")
+        release(db_path, call_id, details, response_received=False)
         raise VisualAIUnavailable("error") from None
     except openai.OpenAIError as error:
         code = getattr(error, "code", None)
-        print(f"Visual AI error: {type(error).__name__} code={code}")
-        release(db_path, call_id, f"{type(error).__name__} code={code}", response_received=True)
+        details = describe_error(error)
+        print(f"Visual AI error: {details}")
+        release(db_path, call_id, details, response_received=True)
         raise VisualAIUnavailable("quota" if code == "insufficient_quota" else "error") from None
     except BaseException as error:
         # Неожиданный сбой до ответа — считаем, что ответа не было.

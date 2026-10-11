@@ -343,47 +343,130 @@ def _fts_query(terms):
     return " OR ".join(parts)
 
 
-def search_candidates(db_path, terms, brands=(), limit=8, per_document=4):
-    """Дешёвый поиск страниц-кандидатов по терминам и маркам.
+# --- служебные страницы ---
 
-    Ранг: полнотекстовая релевантность + совпадение марки + доля
-    иллюстраций + реклама/подписи. Возвращает список dict.
+# Строка указателя или оглавления: текст, затем номера страниц (до 3 цифр,
+# чтобы подписи с годами «Necklace, 1964» не принимались за указатель).
+_NUMBERED_LINE = re.compile(r"^(\D{2,70}?)[,.]?\s+(\d{1,3})(?:\s*[-–,;]\s*\d{1,3})*\.?$")
+SERVICE_HEADINGS = (
+    "contents", "table of contents", "index", "bibliography", "further reading",
+    "acknowledgements", "acknowledgments", "list of illustrations", "glossary",
+    "indice", "sommario", "bibliografia", "inhaltsverzeichnis", "register",
+    "literatur", "sommaire", "table des matières", "obsah", "rejstřík",
+    "spis treści", "содержание", "оглавление", "указатель", "библиография",
+)
+FRONT_MATTER = ("isbn", "all rights reserved", "printed in", "library of congress",
+                "cataloguing in publication", "cataloging-in-publication")
+
+
+def service_reason(original_text):
+    """Почему страница служебная (оглавление, указатель, выходные данные,
+    библиография) — или None. Нужен исходный OCR с переносами строк."""
+    text = original_text or ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lower = text.lower()
+    head = " ".join(lines[:3]).lower()
+
+    if any(marker in lower for marker in FRONT_MATTER):
+        return "выходные данные"
+    if len(lines) >= 6:
+        # «Fig. 12», «Plate 54», «No. 7» — подписи к иллюстрациям, не указатель.
+        numbered = [
+            m for m in (
+                _NUMBERED_LINE.match(line) for line in lines if not CAPTION_MARKERS.match(line)
+            ) if m
+        ]
+        if len(numbered) / len(lines) >= 0.5:
+            letters = [m.group(1).strip()[:1].lower() for m in numbered]
+            numbers = [int(m.group(2)) for m in numbered]
+            pairs = max(1, len(numbered) - 1)
+            alphabetical = sum(1 for a, b in zip(letters, letters[1:]) if a <= b) / pairs
+            increasing = sum(1 for a, b in zip(numbers, numbers[1:]) if a <= b) / pairs
+            if increasing >= 0.8:
+                return "оглавление"
+            if alphabetical >= 0.8:
+                return "указатель"
+    for heading in SERVICE_HEADINGS:
+        if head.startswith(heading) or re.match(rf"^\W*{re.escape(heading)}\b", head):
+            return {
+                "contents": "оглавление", "table of contents": "оглавление",
+                "index": "указатель", "bibliography": "библиография",
+            }.get(heading, "служебная страница")
+    return None
+
+
+def documents_for_brands(conn, brands):
+    """Книги, в названии которых есть марка с клейма (например «Sarah Coventry Jewelry»)."""
+    if not brands:
+        return {}
+    found = {}
+    for doc_id, title, file_title in conn.execute(
+        "SELECT id, COALESCE(meta_title, ''), COALESCE(title, '') FROM library_documents "
+        "WHERE COALESCE(storage_key, '') LIKE 'books/%'"
+    ):
+        haystack = " " + re.sub(r"[^\w]+", " ", f"{title} {file_title}".lower()) + " "
+        for brand in brands:
+            key = " " + re.sub(r"[^\w]+", " ", brand.lower()).strip() + " "
+            if brand not in WEAK_BRANDS and key in haystack:
+                found[doc_id] = brand
+                break
+    return found
+
+
+def search_candidates(db_path, terms, brands=(), limit=8, per_document=4, with_excluded=False):
+    """Дешёвый (без ИИ) поиск страниц-кандидатов по всей библиотеке.
+
+    1. Книги, в названии которых есть марка с клейма, участвуют целиком:
+       их страницы ранжируются по подписям, иллюстрациям, рекламе и словам
+       описания, даже если сама марка на странице не напечатана.
+    2. Плюс полнотекстовые совпадения (FTS5) по всем книгам.
+    3. Служебные страницы (оглавление, указатель, выходные данные,
+       библиография) исключаются.
+
+    Возвращает список dict; with_excluded=True — ещё и (номер страницы,
+    причина) исключённых служебных страниц, для диагностики.
     """
     terms = [t for t in dict.fromkeys(t.strip().lower() for t in terms if t and t.strip())]
     brands = [b.lower() for b in brands if b]
+    excluded = []
     if not terms and not brands:
-        return []
+        return ([], excluded) if with_excluded else []
     query_terms = terms + [b for b in brands if b not in terms]
 
     conn = sqlite3.connect(db_path)
     try:
+        brand_docs = documents_for_brands(conn, brands)
+
+        hits = {}
         if has_fts(conn):
             match = _fts_query(query_terms)
-            if not match:
-                return []
-            rows = conn.execute(
-                """
-                SELECT f.document_id, f.pdf_page, bm25(visual_page_fts) AS rank
-                FROM visual_page_fts f
-                WHERE visual_page_fts MATCH ?
-                ORDER BY rank
-                LIMIT 400
-                """,
-                (match,),
-            ).fetchall()
-            hits = {(doc, page): -rank for doc, page, rank in rows}
+            if match:
+                for doc, page, rank in conn.execute(
+                    """
+                    SELECT f.document_id, f.pdf_page, bm25(visual_page_fts) AS rank
+                    FROM visual_page_fts f
+                    WHERE visual_page_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT 600
+                    """,
+                    (match,),
+                ):
+                    hits[(doc, page)] = -rank
         else:
-            hits = {}
             for term in query_terms:
                 for doc, page in conn.execute(
                     "SELECT document_id, pdf_page FROM library_pages "
-                    "WHERE COALESCE(cleaned_text, original_text) LIKE ? LIMIT 400",
+                    "WHERE COALESCE(cleaned_text, original_text) LIKE ? LIMIT 600",
                     (f"%{term}%",),
                 ):
                     hits[(doc, page)] = hits.get((doc, page), 0) + 1.0
 
-        if not hits:
-            return []
+        # Все страницы книг «по марке» — тоже кандидаты.
+        for doc_id in brand_docs:
+            for (page,) in conn.execute(
+                "SELECT pdf_page FROM visual_page_index WHERE document_id = ?", (doc_id,)
+            ):
+                hits.setdefault((doc_id, page), 0.0)
 
         results = []
         for (doc, page), text_score in hits.items():
@@ -392,7 +475,8 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4):
                 SELECT i.document_code, i.captions, i.years, i.brands, i.ad_score,
                        i.illustration_score,
                        COALESCE(NULLIF(d.meta_title, ''), d.title),
-                       COALESCE(p.cleaned_text, p.original_text, '')
+                       COALESCE(p.cleaned_text, p.original_text, ''),
+                       COALESCE(p.original_text, '')
                 FROM visual_page_index i
                 JOIN library_documents d ON d.id = i.document_id
                 JOIN library_pages p ON p.document_id = i.document_id AND p.pdf_page = i.pdf_page
@@ -402,38 +486,68 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4):
             ).fetchone()
             if row is None:
                 continue
-            code, captions, years, page_brands, ad, illustration, title, text = row
+            code, captions, years, page_brands, ad, illustration, title, text, original = row
+
+            reason = service_reason(original)
+            if reason:
+                excluded.append((code, page, reason))
+                continue
+
             page_brands = json.loads(page_brands or "[]")
+            captions = json.loads(captions or "[]")
             lower = text.lower()
-            term_hits = sum(1 for t in terms if t in lower)
-            brand_hit = any(b in page_brands or b in lower for b in brands)
-            # Служебные страницы (оглавление, копирайт, указатель) — ниже.
-            quality = library_search.page_quality(text, service_only=True)
-            score = (0.3 + 0.7 * quality) * (
-                text_score
-                + 0.6 * term_hits
-                + (3.0 if brand_hit else 0.0)
+            matched_terms = [t for t in terms if t in lower]
+            brand_on_page = any(b in page_brands or b in lower for b in brands)
+            in_brand_book = doc in brand_docs
+
+            score = (
+                min(text_score, 8.0)
+                + 0.8 * len(matched_terms)
+                + (3.0 if brand_on_page else 0.0)
+                + (4.0 if in_brand_book else 0.0)
                 + 1.5 * illustration
                 + 1.0 * ad
-                + (0.5 if captions and captions != "[]" else 0.0)
+                + (0.7 if captions else 0.0)
             )
+            # Страница о ДРУГОЙ марке (на клейме одна, на странице другая) — ниже.
+            if brands and page_brands and not brand_on_page:
+                score -= 2.5
+            # Книга по марке без единой зацепки на странице — ниже страниц с зацепками.
+            if in_brand_book and not (matched_terms or brand_on_page or captions or ad >= 0.3):
+                score -= 2.0
+
+            why = []
+            if in_brand_book:
+                why.append(f"книга о марке {brand_docs[doc].title()}")
+            if brand_on_page:
+                why.append("марка на странице")
+            if matched_terms:
+                why.append("слова: " + ", ".join(matched_terms[:4]))
+            if captions:
+                why.append("подпись к иллюстрации")
+            if ad >= 0.5:
+                why.append("похоже на рекламу/каталог")
+            if illustration >= 0.5:
+                why.append("страница с иллюстрацией")
+
             results.append({
                 "document_id": doc,
                 "document_code": code,
                 "title": title,
                 "pdf_page": page,
                 "score": round(score, 3),
-                "captions": json.loads(captions or "[]"),
+                "captions": captions,
                 "years": json.loads(years or "[]"),
                 "brands": page_brands,
                 "ad_score": ad,
                 "illustration_score": illustration,
                 "text": text,
+                "why": why,
             })
     finally:
         conn.close()
 
-    results.sort(key=lambda r: -r["score"])
+    results.sort(key=lambda r: (-r["score"], r["document_id"], r["pdf_page"]))
     picked, per_doc = [], {}
     for result in results:
         count = per_doc.get(result["document_id"], 0)
@@ -443,4 +557,4 @@ def search_candidates(db_path, terms, brands=(), limit=8, per_document=4):
         picked.append(result)
         if len(picked) >= limit:
             break
-    return picked
+    return (picked, excluded) if with_excluded else picked
