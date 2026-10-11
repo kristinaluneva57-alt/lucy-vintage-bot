@@ -297,7 +297,7 @@ def clean_ocr_text(text):
 
     return cleaned.strip()
 
-def ocr_pdf_page(file_path, pdf_page, language="eng"):
+def ocr_pdf_page(file_path, pdf_page, language="eng", dpi=300):
     """
     Распознаёт скан PDF с указанным языком.
     Поддерживает развороты из двух страниц.
@@ -327,7 +327,7 @@ def ocr_pdf_page(file_path, pdf_page, language="eng"):
 
         for region in regions:
             pix = page.get_pixmap(
-                matrix=fitz.Matrix(300 / 72, 300 / 72),
+                matrix=fitz.Matrix(dpi / 72, dpi / 72),
                 clip=region,
                 alpha=False,
             )
@@ -501,9 +501,40 @@ def import_pdf_with_ocr(
                 force_ocr=False,
             )
             result["created"] = created
+            result.update(_detect_metadata_safely(document_id))
             return result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def metadata_lines(result):
+    """Строки для сообщения о готовой книге: название и автор."""
+    title = result.get("meta_title") or "Название не определено"
+    lines = f"Название: {title}\n"
+    if result.get("meta_author"):
+        lines += f"Автор: {result['meta_author']}\n"
+    if not result.get("meta_title") and not result.get("meta_manual"):
+        lines += (
+            f"Задать вручную: /settitle {result['document_code']} Название | Автор\n"
+        )
+    return lines
+
+
+def _detect_metadata_safely(document_id):
+    """После импорта определяет название и автора по сохранённому OCR.
+    Ошибка здесь не должна ломать импорт книги."""
+    try:
+        import library_catalog
+
+        detected, saved, manual = library_catalog.refresh_document_metadata(document_id)
+        return {
+            "meta_title": detected["title"],
+            "meta_author": detected["author"],
+            "meta_manual": manual,
+        }
+    except Exception as error:
+        print(f"metadata detection failed: {type(error).__name__}: {error}")
+        return {"meta_title": None, "meta_author": None, "meta_manual": False}
 
 
 def get_document(document_code):
@@ -566,6 +597,7 @@ def reocr_document(document_code, language, force_ocr=False):
                 force_ocr=force_ocr,
             )
             result["title"] = title
+            result.update(_detect_metadata_safely(document_id))
             return result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

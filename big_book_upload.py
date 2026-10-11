@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request, render_template_string
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from library_importer import OCR_LANGUAGES, import_pdf_with_ocr
+from library_importer import OCR_LANGUAGES, import_pdf_with_ocr, metadata_lines
 
 
 log = logging.getLogger(__name__)
@@ -344,9 +344,10 @@ def process_book(key, title, language):
         )
         notify_admin(
             f"{heading}\n\n"
-            f"📚 {title}\n"
+            f"📚 Файл: {title}\n"
             f"Документ: {result['document_code']}\n"
-            f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
+            + metadata_lines(result)
+            + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
             f"Страниц: {result['total_pages']}\n"
             f"Обработано: {result['completed_pages']}\n"
             f"Статус: {result['status']}"

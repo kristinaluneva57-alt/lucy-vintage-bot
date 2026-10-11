@@ -201,12 +201,21 @@ class FakeChat:
         async def _noop(*args, **kwargs):
             return None
 
+        self.tasks = []
         self.context = types.SimpleNamespace(
             user_data={},
             bot_data={},
             args=[],
             bot=types.SimpleNamespace(send_chat_action=_noop, send_message=_noop),
+            # Фоновые задачи складываются сюда; тест запускает их сам.
+            application=types.SimpleNamespace(create_task=self.tasks.append),
         )
+
+    async def run_tasks(self):
+        start = len(self.sent)
+        while self.tasks:
+            await self.tasks.pop(0)
+        return self.sent[start:]
 
     def _update(self, message=None, callback_query=None):
         return types.SimpleNamespace(
