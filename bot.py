@@ -1,7 +1,8 @@
 import os
 import asyncio
 import sqlite3
-from book_upload import receive_book_pdf
+from functools import wraps
+from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server
 
 from library_db import init_library_db
@@ -297,6 +298,25 @@ def save_item(
 def is_admin(user_id):
     admin_id = os.environ.get("LUCY_ADMIN_ID", "").strip()
     return bool(admin_id) and str(user_id) == admin_id
+
+
+def admin_only(handler):
+    """Пускает в служебную команду только администратора (LUCY_ADMIN_ID)."""
+
+    @wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+
+        if user is None or not is_admin(user.id):
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "🔒 Команда доступна только администратору."
+                )
+            return
+
+        return await handler(update, context)
+
+    return wrapper
 
 
 # Старые находки без владельца видит только администратор.
@@ -734,6 +754,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         return
+@admin_only
 async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -762,6 +783,7 @@ async def test_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("❌ В базе знаний пока пусто.")
+@admin_only
 async def test_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         fact_id = save_library_fact(
@@ -794,6 +816,7 @@ async def test_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Ошибка моста: {type(error).__name__}: {error}"
         )
 
+@admin_only
 async def extract_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         candidates = extract_page_facts(
@@ -829,6 +852,7 @@ async def extract_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+@admin_only
 async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     test_checksum = "OMG-IMPORTER-TEST-V1"
 
@@ -872,6 +896,7 @@ async def test_importer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Последняя страница: {last_page}\n"
         f"Ошибка: {error}"
     )
+@admin_only
 async def test_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = [
         "R2_ENDPOINT_URL",
@@ -888,7 +913,21 @@ async def test_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔧 ENV TEST\n\n" + result
     )
+@admin_only
 async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Тот же замок, что у загрузки PDF через чат: обе обработки
+    # пишут во временный файл /tmp/library_import.pdf.
+    if _upload_lock.locked():
+        await update.message.reply_text(
+            "⏳ Другая книга ещё обрабатывается. Попробуй позже."
+        )
+        return
+
+    async with _upload_lock:
+        await _import_jet(update)
+
+
+async def _import_jet(update: Update):
     await update.message.reply_text(
         "📚 Начинаю импорт Jet.\n"
         "OCR обрабатывает всю книгу. Это может занять некоторое время."
@@ -914,7 +953,8 @@ async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn.commit()
         conn.close()
-        result = import_pdf_with_ocr(
+        result = await asyncio.to_thread(
+            import_pdf_with_ocr,
             storage_key="books/BOOK-000001/Book 1.pdf",
             title="Jet Jewellery and Ornaments",
             language="eng",
@@ -934,13 +974,14 @@ async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{type(error).__name__}: {error}\n\n"
             "Уже сохранённые страницы не потеряны."
         )
+@admin_only
 async def test_r2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage_key = "books/BOOK-000001/Book 1.pdf"
     local_path = "/tmp/book_000001.pdf"
 
     try:
-        download_pdf_from_r2(storage_key, local_path)
-        result = inspect_pdf(local_path)
+        await asyncio.to_thread(download_pdf_from_r2, storage_key, local_path)
+        result = await asyncio.to_thread(inspect_pdf, local_path)
 
         await update.message.reply_text(
             "☁️ R2 ТЕСТ УСПЕШЕН\n\n"
