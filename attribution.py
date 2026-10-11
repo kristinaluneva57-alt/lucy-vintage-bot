@@ -958,8 +958,10 @@ def summary_for_card(result):
     return f"{label}: {' '.join(parts) or 'см. источник'} — {source_line(best)}"
 
 
-def save_to_card(db_path, attribution_id, user_id):
-    """Сохраняет атрибуцию в карточку владелицы. Возвращает текст или None."""
+def save_to_card(db_path, attribution_id, user_id, allow_unowned=False):
+    """Сохраняет атрибуцию в карточку владелицы. Возвращает текст или None.
+    allow_unowned=True (только администратор) — ещё и старые карточки без
+    владелицы, как в «Моей шкатулке»."""
     record = get_attribution(db_path, attribution_id)
     if not record or record["user_id"] != user_id or not record["item_code"] or not record["result"]:
         return None
@@ -968,9 +970,11 @@ def save_to_card(db_path, attribution_id, user_id):
         return None
     conn = sqlite3.connect(db_path)
     try:
+        access = "(owner_user_id = ? OR (owner_user_id IS NULL AND ?)) AND deleted_at IS NULL"
+        access_params = (user_id, bool(allow_unowned))
         owner = conn.execute(
-            "SELECT 1 FROM items WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL",
-            (record["item_code"], user_id),
+            f"SELECT 1 FROM items WHERE item_code = ? AND {access}",
+            (record["item_code"], *access_params),
         ).fetchone()
         if not owner:
             return None
@@ -980,8 +984,8 @@ def save_to_card(db_path, attribution_id, user_id):
         )
         conn.execute(
             "UPDATE items SET attribution_status = ?, updated_at = datetime('now') "
-            "WHERE item_code = ? AND owner_user_id = ?",
-            (summary[:300], record["item_code"], user_id),
+            f"WHERE item_code = ? AND {access}",
+            (summary[:300], record["item_code"], *access_params),
         )
         conn.commit()
     finally:

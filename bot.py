@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import re
 import time
 
 import library_search
@@ -90,6 +91,11 @@ ANKETA_KEYS = [
     "edit_kind",
     "edit_started",
     "edit_photo_count",
+    "quick_code",
+    "quick_step",
+    "quick_started",
+    "quick_suggestion",
+    "quick_group",
 ]
 
 
@@ -137,6 +143,8 @@ def init_db():
         ("mark_text", "TEXT"),
         ("notes", "TEXT"),
         ("updated_at", "TEXT"),
+        # yes / no / unknown / not_asked; NULL — старые карточки (до быстрой анкеты)
+        ("mark_status", "TEXT"),
     ]
 
     existing_columns = {
@@ -424,25 +432,54 @@ OWNER_FILTER = (
 )
 
 
+def item_access(user_id):
+    """Одно правило доступа для всего, что делается с карточкой:
+    показ в шкатулке, удаление, редактирование, исследование.
+    Владелица видит и меняет свои карточки; старые карточки без владелицы
+    (созданные до появления owner_user_id) — только администратор.
+    Возвращает (SQL-условие, параметры)."""
+    return OWNER_FILTER, (user_id, bool(is_admin(user_id)))
+
+
 def delete_item(item_code, user_id):
-    """Прячет карточку владелицы. Чужие и старые карточки без владельца
+    """Прячет карточку (deleted_at) — по тому же правилу, по которому она
+    видна в шкатулке. Запись и фото остаются в базе. Чужие карточки
     удалить нельзя. Возвращает True, если карточка удалена."""
+    access, params = item_access(user_id)
     conn = sqlite3.connect(DB_PATH)
     try:
         cursor = conn.execute(
-            """
+            f"""
             UPDATE items
             SET deleted_at = datetime('now')
-            WHERE item_code = ?
-              AND owner_user_id = ?
-              AND deleted_at IS NULL
+            WHERE item_code = ? AND {access}
             """,
-            (item_code, user_id),
+            (item_code, *params),
         )
         conn.commit()
         return cursor.rowcount == 1
     finally:
         conn.close()
+
+
+def item_state(item_code, user_id):
+    """Для понятного ответа: active — карточка доступна; deleted — была
+    доступна, но уже удалена; missing — нет такой или она чужая."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT owner_user_id, deleted_at FROM items WHERE item_code = ?",
+            (item_code,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return "missing"
+    owner, deleted_at = row
+    allowed = owner == user_id or (owner is None and is_admin(user_id))
+    if not allowed:
+        return "missing"
+    return "deleted" if deleted_at else "active"
 
 
 # Поля карточки, которые владелица может менять:
@@ -491,14 +528,12 @@ EDIT_TIMEOUT_SECONDS = 30 * 60
 
 
 def owns_item(item_code, user_id):
+    access, params = item_access(user_id)
     conn = sqlite3.connect(DB_PATH)
     try:
         row = conn.execute(
-            """
-            SELECT 1 FROM items
-            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
-            """,
-            (item_code, user_id),
+            f"SELECT 1 FROM items WHERE item_code = ? AND {access}",
+            (item_code, *params),
         ).fetchone()
         return row is not None
     finally:
@@ -508,14 +543,12 @@ def owns_item(item_code, user_id):
 def get_item_field(item_code, user_id, field):
     if field not in EDITABLE_FIELDS:
         raise ValueError(f"Поле нельзя редактировать: {field}")
+    access, access_params = item_access(user_id)
     conn = sqlite3.connect(DB_PATH)
     try:
         row = conn.execute(
-            f"""
-            SELECT {field} FROM items
-            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
-            """,
-            (item_code, user_id),
+            f"SELECT {field} FROM items WHERE item_code = ? AND {access}",
+            (item_code, *access_params),
         ).fetchone()
         return row[0] if row else None
     finally:
@@ -533,19 +566,20 @@ def update_item_field(item_code, user_id, field, value, append=False):
             f"CASE WHEN COALESCE({field}, '') = '' THEN ? "
             f"ELSE {field} || char(10) || char(10) || ? END"
         )
-        params = (value, value, item_code, user_id)
+        params = (value, value, item_code)
     else:
         new_value = "?"
-        params = (value, item_code, user_id)
+        params = (value, item_code)
+    access, access_params = item_access(user_id)
     conn = sqlite3.connect(DB_PATH)
     try:
         cursor = conn.execute(
             f"""
             UPDATE items
             SET {field} = {new_value}, updated_at = datetime('now')
-            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            WHERE item_code = ? AND {access}
             """,
-            params,
+            (*params, *access_params),
         )
         conn.commit()
         return cursor.rowcount == 1
@@ -617,7 +651,7 @@ def get_item(item_code, user_id):
         f"""
         SELECT item_code, measurements, weight, provenance,
                seller_story, attribution_status, front_photo, back_photo, mark_photo, details_photo,
-               mark_text, notes
+               mark_text, notes, mark_status
         FROM items
         WHERE item_code = ?
           AND {OWNER_FILTER}
@@ -629,12 +663,33 @@ def get_item(item_code, user_id):
     conn.close()
 
     return item
-def mark_text_label(mark_text, mark_photo=None):
+def mark_text_label(mark_text, mark_photo=None, mark_status=None):
+    """Строка «Надпись на клейме». Отсутствие сведений — не то же самое,
+    что отсутствие клейма: «клейма нет» только при явном ответе «Нет».
+    Старые карточки (mark_status = NULL) показываются как «не указано»."""
     if mark_text:
         return mark_text
-    if mark_photo:
-        return "не записана"
-    return "клейма нет"
+    if mark_photo or mark_status == "yes":
+        return "клеймо есть, надпись не записана"
+    if mark_status == "no":
+        return "клейма нет"
+    if mark_status == "unknown":
+        return "не проверено"
+    return "не указано"
+
+
+def missing_details(back_photo, mark_photo, mark_text, mark_status, notes, measurements):
+    """Что ещё можно добавить в карточку (всё необязательно)."""
+    missing = []
+    if not back_photo:
+        missing.append("фото оборота")
+    if not mark_photo and not mark_text and mark_status != "no":
+        missing.append("клеймо")
+    if not notes:
+        missing.append("описание")
+    if not measurements:
+        missing.append("размеры")
+    return missing
 
 
 async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,6 +722,7 @@ async def show_item_card(message, item_code, user_id):
         details_photo,
         mark_text,
         notes,
+        mark_status,
     ) = item
 
     if front_photo:
@@ -675,7 +731,9 @@ async def show_item_card(message, item_code, user_id):
     if back_photo:
         await message.reply_photo(photo=back_photo)
 
-    extra_count = len(get_item_photos(item_code))
+    extra_photos = get_item_photos(item_code)
+    extra_count = len(extra_photos)
+    has_mark_photo = bool(mark_photo) or any(kind == "mark" for kind, _ in extra_photos)
     notes_block = f"─── ОПИСАНИЕ ───\n{notes}\n\n" if notes else ""
     extra_line = (
         f"📸 Дополнительных фото: {extra_count}\n" if extra_count else ""
@@ -686,17 +744,23 @@ async def show_item_card(message, item_code, user_id):
         f"💎 {item_code}\n"
         "Карточка находки\n\n"
         "─── ПАСПОРТ ПРЕДМЕТА ───\n"
-        f"📏 Размер: {measurements}\n"
-        f"⚖️ Вес: {weight}\n"
-        f"📍 Происхождение: {provenance}\n"
-        f"🔖 Надпись на клейме: {mark_text_label(mark_text, mark_photo)}\n"
+        f"📏 Размер: {measurements or 'не указан'}\n"
+        f"⚖️ Вес: {weight or 'не указан'}\n"
+        f"📍 Происхождение: {provenance or 'не указано'}\n"
+        f"🔖 Надпись на клейме: {mark_text_label(mark_text, has_mark_photo, mark_status)}\n"
         f"{extra_line}\n"
         f"{notes_block}"
         "─── АТРИБУЦИЯ ───\n"
-        f"◇ Статус: {attribution_status}\n\n"
+        f"◇ Статус: {attribution_status or 'не определено'}\n\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
-        f"{seller_story}"
+        f"{seller_story or 'не указана'}"
     )
+    missing = missing_details(back_photo, has_mark_photo, mark_text, mark_status, notes, measurements)
+    if missing:
+        card += (
+            "\n\n📝 Можно дополнить (необязательно): " + ", ".join(missing)
+            + " — кнопка «✏️ Редактировать»."
+        )
     details_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             "🔬 Клеймо и детали",
@@ -704,7 +768,7 @@ async def show_item_card(message, item_code, user_id):
         )],
         [InlineKeyboardButton(
             "🔬 Исследовать по библиотеке",
-            callback_data=f"vattr:{item_code}"
+            callback_data=f"vpre:{item_code}"
         )],
         [InlineKeyboardButton(
             "✏️ Редактировать",
@@ -762,8 +826,10 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if deleted:
             text = f"🗑 Карточка {item_code} удалена из шкатулки."
+        elif item_state(item_code, user_id) == "deleted":
+            text = f"Карточка {item_code} уже удалена. 🔎"
         else:
-            text = "Эту карточку удалить нельзя — она уже удалена или не твоя. 🔎"
+            text = "Не нашла эту карточку в твоей шкатулке. 🔎"
         await query.message.reply_text(text, reply_markup=main_keyboard())
 
 
@@ -996,15 +1062,16 @@ async def handle_edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def card_for_attribution(item_code, user_id):
     """Поля и фото своей карточки для атрибуции. None — карточка не своя."""
+    access, params = item_access(user_id)
     conn = sqlite3.connect(DB_PATH)
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT front_photo, back_photo, mark_photo, details_photo, mark_text, notes
             FROM items
-            WHERE item_code = ? AND owner_user_id = ? AND deleted_at IS NULL
+            WHERE item_code = ? AND {access}
             """,
-            (item_code, user_id),
+            (item_code, *params),
         ).fetchone()
     finally:
         conn.close()
@@ -1030,7 +1097,14 @@ async def attribution_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     action, _, rest = query.data.partition(":")
     user_id = update.effective_user.id
 
-    if action == "vattr":
+    if action == "vpre":
+        await research_preview(query.message, context, rest, user_id)
+    elif action == "vattr":
+        # Исследование подтверждено — анкету этой карточки закрываем, чтобы
+        # следующее фото не прилипло к ней случайно. Продолжить можно
+        # кнопкой «➕ Добавить подробности».
+        if context.user_data.get("quick_code") == rest:
+            clear_quick_state(context)
         await start_attribution(query.message, context, rest, user_id)
     elif action == "vsrc":
         await send_attribution_source(query.message, rest, user_id)
@@ -1166,7 +1240,8 @@ async def save_attribution(message, rest, user_id):
         attribution_id = int(rest)
     except ValueError:
         return
-    summary = await asyncio.to_thread(attribution.save_to_card, DB_PATH, attribution_id, user_id)
+    summary = await asyncio.to_thread(attribution.save_to_card, DB_PATH, attribution_id, user_id,
+        allow_unowned=bool(is_admin(user_id)))
     if summary is None:
         await message.reply_text("Сохранить нельзя: нет подтверждённого совпадения или карточка не твоя.")
         return
@@ -1269,6 +1344,12 @@ TEXT_STEP_HINTS = {
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     step = context.user_data.get("step")
+
+    if context.user_data.get("mode") == "quick":
+        if quick_state_fresh(context):
+            await handle_quick_photo(update, context)
+            return
+        clear_quick_state(context)
 
     if context.user_data.get("mode") in ("edit", "edit_photo"):
         if not edit_state_fresh(context):
@@ -1630,6 +1711,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_menu_button(update, context, text)
         return
 
+    if mode == "quick":
+        if quick_state_fresh(context):
+            await handle_quick_text(update, context, text)
+            return
+        clear_quick_state(context)
+        mode = None
+
     if mode in ("edit", "edit_photo"):
         if not edit_state_fresh(context):
             clear_edit_state(context)
@@ -1942,19 +2030,537 @@ BOX_INTRO_TEXT = (
 )
 
 
+# --- быстрое добавление украшения ---
+# Главное — фото лицевой стороны: карточка сохраняется сразу после него.
+# Оборот и клеймо предлагаются, но не обязательны; всё остальное — потом,
+# через «✏️ Редактировать». «🔬 Исследовать сейчас» доступна с первого фото,
+# а платное исследование запускается только после подтверждения.
+
+QUICK_TIMEOUT_SECONDS = 30 * 60
+
+QUICK_INTRO = (
+    "➕ НОВОЕ УКРАШЕНИЕ\n\n"
+    "📸 Пришли фото лицевой стороны украшения целиком — этого уже "
+    "достаточно, чтобы начать.\n\n"
+    "Оборот, клеймо и подробности можно добавить сразу или позже — "
+    "всё необязательно.\n\n"
+    "💬 Люся: снимай при дневном свете у окна, без вспышки. "
+    "И протри камеру телефона — серьёзно. 😂"
+)
+
+QUICK_FINAL = (
+    "Я уже могу попробовать исследовать твоё украшение! 🔬\n\n"
+    "Фотография оборотной стороны, клеймо и дополнительные детали могут "
+    "помочь точнее определить производителя, возраст и найти совпадения "
+    "в исторических каталогах.\n\n"
+    "Ты можешь начать исследование сейчас или дополнить карточку. "
+    "Все дополнительные сведения необязательны."
+)
+
+MARK_ANSWERS = {
+    "есть": "yes", "да": "yes", "✅ есть": "yes",
+    "нет": "no", "🚫 нет": "no", "клейма нет": "no", "нет клейма": "no",
+    "не знаю": "unknown", "🤷 не знаю": "unknown", "незнаю": "unknown",
+}
+SKIP_WORDS = {"пропустить", "пропусти", "дальше", "без оборота", "нет", "⏭ пропустить"}
+
+
+def research_now_button(item_code):
+    return InlineKeyboardButton("🔬 Исследовать сейчас", callback_data=f"vpre:{item_code}")
+
+
+def quick_state_fresh(context):
+    started = context.user_data.get("quick_started")
+    return (
+        context.user_data.get("mode") == "quick"
+        and started is not None
+        and time.time() - started < QUICK_TIMEOUT_SECONDS
+    )
+
+
+QUICK_RESUMABLE_STEPS = ("back", "mark_question", "mark_input", "mark_text")
+
+
+def clear_quick_state(context):
+    for key in ("quick_code", "quick_step", "quick_started", "quick_suggestion", "quick_group"):
+        context.user_data.pop(key, None)
+    if context.user_data.get("mode") == "quick":
+        context.user_data["mode"] = None
+
+
+def create_quick_item(user_id, front_photo):
+    """Карточка создаётся сразу после первого фото — ничего не теряется."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO items (front_photo, owner_user_id, mark_status, updated_at) "
+            "VALUES (?, ?, 'not_asked', datetime('now'))",
+            (front_photo, user_id),
+        )
+        item_id = cursor.lastrowid
+        item_code = f"OMG-{item_id:06d}"
+        conn.execute("UPDATE items SET item_code = ? WHERE id = ?", (item_code, item_id))
+        conn.commit()
+        return item_code
+    finally:
+        conn.close()
+
+
+QUICK_FIELDS = {"back_photo", "mark_photo", "mark_text", "mark_status"}
+
+
+def set_quick_field(item_code, user_id, field, value):
+    """Записывает одно поле своей карточки. Фото не перезаписываются:
+    если оборот или клеймо уже есть, новое фото добавляется к карточке."""
+    if field not in QUICK_FIELDS:
+        raise ValueError(field)
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            f"SELECT {field} FROM items WHERE item_code = ? AND {access}",
+            (item_code, *params),
+        ).fetchone()
+        if row is None:
+            return False
+        if field.endswith("_photo") and row[0]:
+            conn.execute(
+                "INSERT INTO item_photos (item_code, kind, file_id) VALUES (?, ?, ?)",
+                (item_code, "mark" if field == "mark_photo" else "extra", value),
+            )
+        else:
+            conn.execute(
+                f"UPDATE items SET {field} = ?, updated_at = datetime('now') "
+                f"WHERE item_code = ? AND {access}",
+                (value, item_code, *params),
+            )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def suggest_mark_text(photo_bytes):
+    """Бесплатная попытка прочитать клеймо Tesseract'ом (без ИИ).
+    Возвращает текст для подтверждения или None, если ничего уверенного."""
+    try:
+        raw = page_images.tesseract_text(photo_bytes, "eng")
+    except Exception as error:
+        print(f"mark ocr failed: {type(error).__name__}")
+        return None
+    best = None
+    for line in raw.splitlines():
+        line = " ".join(re.findall(r"[A-Za-z0-9©®&.'\-]+", line)).strip(" .-'")
+        letters = sum(1 for ch in line if ch.isalpha())
+        long_words = [w for w in line.split() if sum(1 for ch in w if ch.isalpha()) >= 4]
+        if letters < 4 or not long_words or len(line) > 60:
+            continue
+        uppercase = sum(1 for ch in line if ch.isupper()) / letters
+        if uppercase < 0.6:
+            continue
+        if best is None or letters > sum(1 for ch in best if ch.isalpha()):
+            best = line
+    return best
+
+
 async def start_anketa(message, context):
     reset_anketa(context)
-    context.user_data["mode"] = "identify"
-    context.user_data["step"] = "front_photo"
+    context.user_data.update({
+        "mode": "quick", "quick_step": "front", "quick_started": time.time(),
+    })
+    await message.reply_text(QUICK_INTRO)
+
+
+def all_fields_button(item_code):
+    return InlineKeyboardButton("✏️ Другие поля карточки", callback_data=f"edit:{item_code}")
+
+
+BACK_PHOTO_HINT = (
+    "📸 Есть фото оборотной стороны? На обороте часто видно клеймо, "
+    "застёжку и то, как закреплены камни, — это помогает определить "
+    "производителя и время изготовления.\n\n"
+    "Пришли фото или нажми «⏭ Без оборота»."
+)
+
+
+async def ask_back_photo(message, item_code, intro=None, resumed=False):
+    if intro is None:
+        intro = f"✅ Фото сохранила — карточка {item_code} уже в «Моей шкатулке»."
+    rows = [
+        [InlineKeyboardButton("⏭ Без оборота", callback_data=f"qskip:{item_code}:back")],
+        [research_now_button(item_code)],
+    ]
+    if resumed:
+        rows.append([all_fields_button(item_code)])
     await message.reply_text(
-        "➕ ДОБАВИТЬ УКРАШЕНИЕ\n\n"
-        "Заведём карточку находки в твоей картотеке. Чем точнее фото "
-        "и записи, тем проще потом исследовать украшение.\n\n"
-        "Начинаем с лицевой стороны.\n\n"
-        "📸 Пришли одно фото украшения целиком.\n\n"
-        "💬 Люся: Маленький секрет хорошей фотографии — "
-        "протри камеру телефона. Серьёзно. 😂\n"
-        "Лучше всего снимать при дневном свете возле окна, без вспышки."
+        intro + "\n\n" + BACK_PHOTO_HINT,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def ask_mark(message, item_code, intro=None, resumed=False):
+    rows = [
+        [
+            InlineKeyboardButton("✅ Есть", callback_data=f"qmark:{item_code}:yes"),
+            InlineKeyboardButton("🚫 Нет", callback_data=f"qmark:{item_code}:no"),
+            InlineKeyboardButton("🤷 Не знаю", callback_data=f"qmark:{item_code}:unknown"),
+        ],
+        [research_now_button(item_code)],
+    ]
+    if resumed:
+        rows.append([all_fields_button(item_code)])
+    await message.reply_text(
+        (intro + "\n\n" if intro else "")
+        + "🔖 Есть ли на украшении клеймо, подпись или надпись?\n"
+        "Обычно их ищут на обороте, на застёжке или на замочке.",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def ask_mark_input(message, item_code, intro=None, resumed=False, photo_saved=False):
+    rows = [
+        [InlineKeyboardButton("⏭ Пропустить", callback_data=f"qmskip:{item_code}")],
+        [research_now_button(item_code)],
+    ]
+    if resumed:
+        rows.append([all_fields_button(item_code)])
+    if photo_saved:
+        text = ("✍️ Фото клейма уже сохранено. Если можешь прочитать надпись — "
+                "напиши её текстом. Или пропусти.")
+    else:
+        text = ("📸 Пришли фото клейма крупным планом — или просто напиши текстом, "
+                "что на нём написано (например: SARAH COVENTRY).")
+    await message.reply_text(
+        (intro + "\n\n" if intro else "") + text,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+def quick_resume_info(item_code, user_id):
+    """С какого шага продолжить быструю анкету — по тому, что уже сохранено
+    в карточке (а не по памяти бота). None — основные шаги пройдены."""
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            f"SELECT back_photo, mark_photo, mark_text, mark_status FROM items "
+            f"WHERE item_code = ? AND {access}",
+            (item_code, *params),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    back, mark_photo, mark_text, status = row
+    has_mark_photo = bool(mark_photo) or any(
+        kind == "mark" for kind, _ in get_item_photos(item_code)
+    )
+    if status == "not_asked":
+        return "mark_question" if back else "back"
+    if status == "yes" and not mark_text and not has_mark_photo:
+        return "mark_input"
+    return None
+
+
+async def resume_quick(message, context, item_code, user_id):
+    """«➕ Добавить подробности»: если анкета не закончена — продолжаем
+    с того же шага той же карточки; иначе — обычное меню редактирования."""
+    data = context.user_data
+    step = None
+    if data.get("quick_code") == item_code and data.get("quick_step") in QUICK_RESUMABLE_STEPS:
+        step = data["quick_step"]
+    if step is None:
+        step = await asyncio.to_thread(quick_resume_info, item_code, user_id)
+    if step is None:
+        clear_quick_state(context)
+        await send_edit_menu(
+            message, item_code,
+            intro="➕ Что добавить? Всё необязательно — можно вернуться к карточке в любой момент.",
+        )
+        return
+
+    data.update({
+        "mode": "quick", "quick_code": item_code, "quick_step": step,
+        "quick_started": time.time(), "quick_group": None,
+    })
+    intro = (f"📝 Продолжаем заполнять {item_code}. Всё, что ты уже прислала, "
+             "сохранено — новая карточка не создаётся.")
+    if step == "back":
+        await ask_back_photo(message, item_code, intro=intro, resumed=True)
+    elif step == "mark_question":
+        await ask_mark(message, item_code, intro=intro, resumed=True)
+    else:
+        await ask_mark_input(message, item_code, intro=intro, resumed=True,
+                             photo_saved=(step == "mark_text"))
+
+
+async def finish_quick(message, context, item_code, note=None):
+    clear_quick_state(context)
+    text = f"🗂 Карточка {item_code} сохранена в «Моей шкатулке».\n\n"
+    if note:
+        text += note + "\n\n"
+    text += QUICK_FINAL
+    await message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [research_now_button(item_code)],
+            [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
+        ]),
+    )
+
+
+async def handle_quick_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    data = context.user_data
+    step = data.get("quick_step")
+    file_id = message.photo[-1].file_id
+    user_id = update.effective_user.id
+    group = message.media_group_id
+
+    # Альбом: первое фото идёт в текущий шаг, остальные — доп. фото карточки.
+    if group and group == data.get("quick_group") and data.get("quick_code"):
+        await asyncio.to_thread(add_item_photo, data["quick_code"], user_id, "extra", file_id)
+        return
+    data["quick_group"] = group
+    data["quick_started"] = time.time()
+
+    if step == "front":
+        item_code = await asyncio.to_thread(create_quick_item, user_id, file_id)
+        data["quick_code"] = item_code
+        data["quick_step"] = "back"
+        await ask_back_photo(message, item_code)
+        return
+
+    item_code = data.get("quick_code")
+    if step == "back":
+        await asyncio.to_thread(set_quick_field, item_code, user_id, "back_photo", file_id)
+        data["quick_step"] = "mark_question"
+        await message.reply_text("✅ Оборот сохранила.")
+        await ask_mark(message, item_code)
+        return
+
+    # Любое фото на шагах клейма — фото клейма.
+    await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_photo", file_id)
+    await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_status", "yes")
+    if step == "mark_text":
+        await message.reply_text("✅ Добавила ещё одно фото клейма.")
+        return
+
+    suggestion = None
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+        photo_bytes = bytes(await telegram_file.download_as_bytearray())
+        suggestion = await asyncio.to_thread(suggest_mark_text, photo_bytes)
+    except Exception as error:
+        print(f"mark suggestion failed: {type(error).__name__}")
+
+    data["quick_step"] = "mark_text"
+    if suggestion:
+        data["quick_suggestion"] = {"code": item_code, "text": suggestion}
+        await message.reply_text(
+            "✅ Фото клейма сохранила.\n\n"
+            f"Я попробовала прочитать его бесплатно, без ИИ. Похоже, там написано: «{suggestion}». Верно?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Да, верно", callback_data=f"qmok:{item_code}")],
+                [InlineKeyboardButton("✏️ Напишу сама", callback_data=f"qmtype:{item_code}")],
+                [InlineKeyboardButton("⏭ Пропустить", callback_data=f"qmskip:{item_code}")],
+                [research_now_button(item_code)],
+            ]),
+        )
+    else:
+        await message.reply_text(
+            "✅ Фото клейма сохранила.\n\n"
+            "Если можешь прочитать надпись — напиши её текстом: по тексту "
+            "клейма поиск по книгам работает точнее. Или пропусти.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭ Пропустить", callback_data=f"qmskip:{item_code}")],
+                [research_now_button(item_code)],
+            ]),
+        )
+
+
+async def handle_quick_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    data = context.user_data
+    step = data.get("quick_step")
+    item_code = data.get("quick_code")
+    user_id = update.effective_user.id
+    lower = text.strip().lower()
+    data["quick_started"] = time.time()
+
+    if step == "front":
+        await update.message.reply_text("📸 Жду фото лицевой стороны украшения.")
+        return
+    if step == "back":
+        if lower in SKIP_WORDS:
+            data["quick_step"] = "mark_question"
+            await ask_mark(update.message, item_code)
+        else:
+            await update.message.reply_text(
+                "📸 Сейчас жду фото оборота. Если его нет — нажми «⏭ Без оборота»."
+            )
+        return
+    if step == "mark_question":
+        answer = MARK_ANSWERS.get(lower)
+        if answer is None:
+            await update.message.reply_text("Ответь, пожалуйста, кнопкой: «Есть», «Нет» или «Не знаю».")
+            return
+        await apply_mark_answer(update.message, context, item_code, user_id, answer)
+        return
+    # mark_input / mark_text: текст — надпись клейма
+    if lower in SKIP_WORDS:
+        await finish_quick(update.message, context, item_code)
+        return
+    await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_text", text.strip()[:200])
+    await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_status", "yes")
+    await finish_quick(update.message, context, item_code, note=f"🔖 Записала надпись клейма: {text.strip()[:200]}")
+
+
+async def apply_mark_answer(message, context, item_code, user_id, answer):
+    await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_status", answer)
+    if answer == "yes":
+        context.user_data["quick_step"] = "mark_input"
+        await ask_mark_input(message, item_code)
+    elif answer == "no":
+        await finish_quick(message, context, item_code)
+    else:
+        await finish_quick(
+            message, context, item_code,
+            note="🔎 Клеймо бывает совсем крошечным — посмотри позже с лупой на обороте и "
+                 "застёжке и добавь его через «✏️ Редактировать».",
+        )
+
+
+async def quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    action, item_code = parts[0], parts[1]
+    user_id = update.effective_user.id
+
+    if not await asyncio.to_thread(owns_item, item_code, user_id):
+        await query.message.reply_text("Эта карточка не найдена в твоей шкатулке. 🔎")
+        return
+
+    if action == "qmore":
+        await resume_quick(query.message, context, item_code, user_id)
+        return
+
+    # Кнопки работают и после перерыва: продолжаем с той карточкой, к которой они относятся.
+    if context.user_data.get("quick_code") != item_code:
+        context.user_data.pop("quick_group", None)
+        context.user_data.pop("quick_suggestion", None)
+    context.user_data.update({"mode": "quick", "quick_code": item_code, "quick_started": time.time()})
+
+    if action == "qskip":
+        # Старая кнопка «Без оборота»: если про клеймо уже ответили — не спрашиваем снова.
+        if await asyncio.to_thread(quick_resume_info, item_code, user_id) == "back":
+            context.user_data["quick_step"] = "mark_question"
+            await ask_mark(query.message, item_code)
+        else:
+            await finish_quick(query.message, context, item_code)
+    elif action == "qmark" and len(parts) > 2 and parts[2] in ("yes", "no", "unknown"):
+        await apply_mark_answer(query.message, context, item_code, user_id, parts[2])
+    elif action == "qmok":
+        stored = context.user_data.get("quick_suggestion") or {}
+        suggestion = stored.get("text") if stored.get("code") == item_code else None
+        if suggestion:
+            await asyncio.to_thread(set_quick_field, item_code, user_id, "mark_text", suggestion)
+            await finish_quick(query.message, context, item_code,
+                               note=f"🔖 Записала надпись клейма: {suggestion}")
+        else:
+            context.user_data["quick_step"] = "mark_text"
+            await query.message.reply_text("Напиши, пожалуйста, надпись клейма текстом.")
+    elif action == "qmtype":
+        context.user_data["quick_step"] = "mark_text"
+        context.user_data.pop("quick_suggestion", None)
+        await query.message.reply_text("✍️ Напиши, что написано на клейме.")
+    elif action == "qmskip":
+        await finish_quick(query.message, context, item_code)
+
+
+def research_preview_data(item_code, user_id):
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT front_photo, back_photo, mark_photo, mark_text, mark_status, notes, measurements
+            FROM items WHERE item_code = ? AND {access}
+            """,
+            (item_code, *params),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row
+
+
+async def research_preview(message, context, item_code, user_id):
+    """Перед платным исследованием: что уже есть и что желательно добавить.
+    Состояние анкеты НЕ сбрасывается: можно передумать и продолжить
+    заполнение той же карточки (фото, присланное сейчас, попадёт в неё)."""
+    row = await asyncio.to_thread(research_preview_data, item_code, user_id)
+    if row is None:
+        await message.reply_text("Исследовать можно только свою карточку. 🔎")
+        return
+    front, back, mark_photo, mark_text, mark_status, notes, measurements = row
+    extra = await asyncio.to_thread(get_item_photos, item_code)
+    if not (front or back or mark_photo or extra):
+        await message.reply_text(
+            "В карточке пока нет фото. Добавь хотя бы фото лицевой стороны: "
+            "✏️ Редактировать → 📸 Добавить фото."
+        )
+        return
+
+    lines = [f"🔬 ПЕРЕД ИССЛЕДОВАНИЕМ — {item_code}", "", "Что уже есть:"]
+    lines.append("✅ фото лицевой стороны" if front else "➖ фото лицевой стороны")
+    lines.append("✅ фото оборота" if back else "➖ фото оборота")
+    if mark_text:
+        lines.append(f"✅ клеймо: «{mark_text}»")
+    elif mark_photo or any(kind == "mark" for kind, _ in extra):
+        lines.append("✅ фото клейма (текст не записан)")
+    elif mark_status == "no":
+        lines.append("➖ клейма нет")
+    elif mark_status == "unknown":
+        lines.append("❔ клеймо: не проверено")
+    elif mark_status == "yes":
+        lines.append("✅ клеймо есть (надпись не записана)")
+    else:
+        lines.append("➖ клеймо: не указано")
+    if notes:
+        lines.append("✅ описание")
+    if extra:
+        lines.append(f"✅ дополнительных фото: {len(extra)}")
+
+    wishes = missing_details(back, mark_photo or any(k == "mark" for k, _ in extra),
+                             mark_text, mark_status, notes, measurements)
+    if wishes:
+        lines += ["", "Желательно, но необязательно: " + ", ".join(wishes) + "."]
+        if "фото оборота" in wishes or "клеймо" in wishes:
+            lines.append("Оборот и клеймо чаще всего помогают найти производителя.")
+
+    mode, reason = await asyncio.to_thread(
+        attribution.decide_mode, DB_PATH, user_id, is_admin(user_id)
+    )
+    lines.append("")
+    if mode == "ai" and is_admin(user_id):
+        lines.append("Режим: ИИ-исследование (администратор — без лимита попыток, в пределах бюджета).")
+    elif mode == "ai":
+        used = await asyncio.to_thread(attribution.paid_this_month, DB_PATH, user_id)
+        total = visual_ai.free_per_month()
+        lines.append(
+            f"Режим: ИИ-исследование — это одна из {total} бесплатных попыток в месяц "
+            f"(осталось {max(0, total - used)}). Попытка спишется только после "
+            "нажатия «Начать исследование»."
+        )
+    else:
+        lines.append(f"Режим: бесплатный поиск по книгам без ИИ — {reason}.")
+
+    await message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔬 Начать исследование", callback_data=f"vattr:{item_code}")],
+            [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
+        ]),
     )
 
 
@@ -2820,6 +3426,65 @@ async def vstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+def item_diagnostics(user_id, codes=None):
+    """Строки для /itemcheck. Без ID пользователей и личных данных:
+    только «ты / не указан / другая участница»."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if codes:
+            marks = ",".join("?" for _ in codes)
+            rows = conn.execute(
+                f"SELECT item_code, owner_user_id, deleted_at FROM items "
+                f"WHERE item_code IN ({marks}) ORDER BY id",
+                codes,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT item_code, owner_user_id, deleted_at FROM items "
+                "WHERE owner_user_id IS NULL OR owner_user_id = ? ORDER BY id LIMIT 30",
+                (user_id,),
+            ).fetchall()
+        counts = conn.execute(
+            "SELECT COUNT(*), SUM(owner_user_id IS NULL), SUM(deleted_at IS NOT NULL) FROM items"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    lines = [
+        "🧾 ПРОВЕРКА КАРТОЧЕК",
+        f"Всего в базе: {counts[0] or 0} · без владелицы: {counts[1] or 0} · "
+        f"удалённых (скрытых): {counts[2] or 0}",
+        "",
+    ]
+    found = set()
+    for code, owner, deleted_at in rows:
+        found.add(code)
+        if owner is None:
+            who = "не указана (старая карточка)"
+        elif owner == user_id:
+            who = "ты"
+        else:
+            who = "другая участница"
+        state = item_state(code, user_id)
+        lines.append(
+            f"{code}: владелица — {who}; удалена — {'да' if deleted_at else 'нет'}; "
+            f"видна тебе и можно удалить — {'да' if state == 'active' else 'нет'}"
+        )
+    for code in codes or []:
+        if code not in found:
+            lines.append(f"{code}: в базе нет")
+    if not rows and not codes:
+        lines.append("Своих карточек и карточек без владелицы нет.")
+    return lines
+
+
+@admin_only
+async def itemcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    codes = [arg.strip().upper() for arg in (context.args or []) if arg.strip()][:20]
+    lines = await asyncio.to_thread(item_diagnostics, update.effective_user.id, codes)
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+
 # --- команды, набранные текстом ---
 # Telegram помечает команду только если «/» стоит в самом начале и
 # в имени только латиница. «/ books», « /books», «/bооks» с русской «о»
@@ -2841,6 +3506,7 @@ def text_commands():
         "dupes": dupes_command,
         "vindex": vindex_command,
         "vstats": vstats_command,
+        "itemcheck": itemcheck_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -2870,7 +3536,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats"
+            known += ", /books, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -2917,13 +3583,15 @@ def main():
     app.add_handler(CommandHandler("dupes", dupes_command))
     app.add_handler(CommandHandler("vindex", vindex_command))
     app.add_handler(CommandHandler("vstats", vstats_command))
+    app.add_handler(CommandHandler("itemcheck", itemcheck_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
-    app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vattr|vsrc|vsave):"))
+    app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vpre|vattr|vsrc|vsave):"))
+    app.add_handler(CallbackQueryHandler(quick_callback, pattern=r"^(qskip|qmark|qmok|qmtype|qmskip|qmore):"))
     app.add_handler(
         MessageHandler(
             filters.Document.ALL,

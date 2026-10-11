@@ -268,7 +268,9 @@ class FakeChat:
             await self.bot.delete_callback(update, self.context)
         elif prefix == "box":
             await self.bot.box_callback(update, self.context)
-        elif prefix in ("vattr", "vsrc", "vsave"):
+        elif prefix in ("qskip", "qmark", "qmok", "qmtype", "qmskip", "qmore"):
+            await self.bot.quick_callback(update, self.context)
+        elif prefix in ("vpre", "vattr", "vsrc", "vsave"):
             await self.bot.attribution_callback(update, self.context)
         elif prefix == "lorig":
             await self.bot.library_original_callback(update, self.context)
