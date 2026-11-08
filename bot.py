@@ -3743,14 +3743,6 @@ ARTICLE_USAGE = (
     "Имена, фирмы и дизайнеров пиши латиницей, как в книгах."
 )
 
-ARTICLE_PROBLEMS = {
-    "disabled": "пересказы по книгам выключены (LUCY_LIBRARY_AI_ENABLED)",
-    "no_key": "не настроен ИИ",
-    "quota": "в OpenAI закончился баланс",
-    "error": "ИИ не ответил",
-}
-
-
 def article_buttons(job_id, start_label):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(start_label, callback_data=f"art:go:{job_id}"),
@@ -3783,7 +3775,7 @@ async def article_worker(message, job_id):
         await send_article_result(message, job_id)
         return
     job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
-    reason = ARTICLE_PROBLEMS.get(job.get("error"), job.get("error") or "сбой")
+    reason = library_article.pause_reason(job.get("error"))
     await message.reply_text(
         f"⏸ Исследование «{job['topic']}» остановилось: {reason}.\n"
         "Сделанные этапы сохранены. Продолжить: "

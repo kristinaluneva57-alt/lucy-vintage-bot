@@ -56,6 +56,8 @@ SECONDS_PER_CALL = 25          # для оценки времени
 AI_TIMEOUT = 120.0
 MAX_TOPIC_CHARS = 120
 PROGRESS_EVERY = 5
+RETRY_DELAY = 5            # секунд перед повтором после сбоя OpenAI
+RATE_LIMIT_DELAY = 60      # перед повтором после «слишком много запросов» (HTTP 429)
 STALE_RESERVATION_MINUTES = 30
 DB_TIMEOUT = 30
 MAX_LISTED_SERVICE_PAGES = 20
@@ -560,6 +562,25 @@ def remaining_estimate(db_path, job):
     return total
 
 
+def pause_reason(error):
+    """Причина остановки для администратора: понятная фраза + технические подробности."""
+    reason, _, details = (error or "error").partition(": ")
+    if reason == "budget":
+        return details or "закончился бюджет досье"
+    text = PROBLEMS.get(reason, reason)
+    if details:
+        text += f" ({details})"
+    return text
+
+
+PROBLEMS = {
+    "disabled": "пересказы по книгам выключены (LUCY_LIBRARY_AI_ENABLED)",
+    "no_key": "не настроен ИИ",
+    "quota": "в OpenAI закончился баланс",
+    "error": "ИИ не ответил",
+}
+
+
 def is_running(job_id):
     return job_id in RUNNING
 
@@ -717,15 +738,19 @@ def call_ai(db_path, job_id, kind, messages, max_tokens):
             temperature=0.2,
         )
     except no_response as error:
-        print(f"Article AI no response: {type(error).__name__}")
-        _finish_call(db_path, call_id, "unknown", error=f"{type(error).__name__} · ответ не получен")
-        raise ArticleUnavailable("error") from None
+        details = f"{type(error).__name__} · ответ не получен"
+        print(f"Article AI no response: {details}")
+        _finish_call(db_path, call_id, "unknown", error=details)
+        raise ArticleUnavailable("error", details) from None
     except openai.OpenAIError as error:
+        details = error_details(error)
+        # В логи и администратору — только тип, HTTP-статус и код ошибки,
+        # без ключей и текста запроса.
+        print(f"Article AI error: {details}")
+        _finish_call(db_path, call_id, "failed", error=details)
         code = getattr(error, "code", None)
-        # В логи — только тип и код ошибки, без ключей и текста запроса.
-        print(f"Article AI error: {type(error).__name__} code={code}")
-        _finish_call(db_path, call_id, "failed", error=f"{type(error).__name__} code={code}")
-        raise ArticleUnavailable("quota" if code in ("insufficient_quota", "billing_hard_limit_reached") else "error") from None
+        reason = "quota" if code in ("insufficient_quota", "billing_hard_limit_reached") else "error"
+        raise ArticleUnavailable(reason, details) from None
     except BaseException as error:
         _finish_call(db_path, call_id, "unknown", error=type(error).__name__)
         raise
@@ -735,10 +760,29 @@ def call_ai(db_path, job_id, kind, messages, max_tokens):
     output_tokens = getattr(usage, "completion_tokens", 0) or 0
     value = visual_ai.cost(input_tokens, output_tokens)
     _finish_call(db_path, call_id, "done", value, input_tokens, output_tokens)
-    text = (response.choices[0].message.content or "").strip()
+    choice = response.choices[0]
+    text = (choice.message.content or "").strip()
     if not text:
-        raise ArticleUnavailable("error")
+        details = f"пустой ответ (finish_reason={getattr(choice, 'finish_reason', None)})"
+        print(f"Article AI error: {details}")
+        raise ArticleUnavailable("error", details)
     return text
+
+
+def error_details(error):
+    """Безопасное описание ошибки OpenAI: тип, HTTP-статус, код."""
+    parts = [type(error).__name__]
+    status = getattr(error, "status_code", None)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    code = getattr(error, "code", None)
+    if code:
+        parts.append(f"code={str(code)[:60]}")
+    return " · ".join(parts)
+
+
+def is_rate_limit(details):
+    return "RateLimitError" in details or "HTTP 429" in details
 
 
 def _fragment_blocks(fragments):
@@ -829,7 +873,7 @@ async def run_job(db_path, job_id, notify):
                     final_messages(topic, joined), FINAL_MAX_TOKENS,
                 )
         except ArticleUnavailable as problem:
-            reason = problem.details or problem.reason
+            reason = f"{problem.reason}: {problem.details}" if problem.details else problem.reason
             await asyncio.to_thread(set_status, db_path, job_id, "paused", reason)
             return "paused"
 
@@ -841,12 +885,17 @@ async def run_job(db_path, job_id, notify):
 
 
 async def _with_retry(function, *args):
-    """Один повтор при сбое OpenAI. Бюджет и выключатель не повторяются."""
+    """Один повтор при сбое OpenAI — после паузы; при лимите запросов пауза длиннее.
+
+    Бюджет, выключатель и закончившийся баланс не повторяются.
+    """
     try:
         return await asyncio.to_thread(function, *args)
     except ArticleUnavailable as problem:
         if problem.reason != "error":
             raise
+        delay = RATE_LIMIT_DELAY if is_rate_limit(problem.details) else RETRY_DELAY
+    await asyncio.sleep(delay)
     return await asyncio.to_thread(function, *args)
 
 

@@ -58,6 +58,7 @@ class FakeOpenAI:
     calls = []
     fail_on = set()      # номера вызовов (с 1), которые падают
     error_code = None
+    error_status = None
 
     def __init__(self, *args, **kwargs):
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
@@ -67,6 +68,7 @@ class FakeOpenAI:
         if len(FakeOpenAI.calls) in FakeOpenAI.fail_on:
             error = openai_module.OpenAIError("сбой sk-SECRET-KEY")
             error.code = FakeOpenAI.error_code
+            error.status_code = FakeOpenAI.error_status
             raise error
         system = kwargs["messages"][0]["content"]
         user = kwargs["messages"][1]["content"]
@@ -144,10 +146,19 @@ class LibraryArticleTest(unittest.IsolatedAsyncioTestCase):
         FakeOpenAI.calls = []
         FakeOpenAI.fail_on = set()
         FakeOpenAI.error_code = None
+        FakeOpenAI.error_status = None
+        self.delays = []
+
+        async def no_sleep(seconds):
+            self.delays.append(seconds)
+
+        self.sleep_patch = mock.patch.object(library_article.asyncio, "sleep", no_sleep)
+        self.sleep_patch.start()
         self.admin = FakeChat(bot, 999)
         self.user = FakeChat(bot, 1)
 
     def tearDown(self):
+        self.sleep_patch.stop()
         self.doc_patch.stop()
         self.openai_patch.stop()
         self.env.stop()
@@ -303,9 +314,10 @@ class LibraryArticleTest(unittest.IsolatedAsyncioTestCase):
         FakeOpenAI.fail_on = {3, 4}  # третий этап падает и при повторе
         replies = await self.run_job(job)
         text = "\n".join(texts(replies))
-        self.assertIn("остановилось", text)
+        self.assertIn("остановилось: ИИ не ответил (OpenAIError)", text)
         self.assertIn("/article Sarah Coventry", text)
         self.assertNotIn("SECRET", text)
+        self.assertEqual(self.delays, [library_article.RETRY_DELAY])  # повтор — после паузы
         self.assertEqual(self.last_job()["status"], "paused")
         self.assertEqual(len(library_article.saved_parts(bot.DB_PATH, job["id"])), 2)
 
@@ -318,6 +330,27 @@ class LibraryArticleTest(unittest.IsolatedAsyncioTestCase):
         await self.admin.run_tasks()
         self.assertEqual(len(FakeOpenAI.calls) - before, parts - 2 + 1)  # только оставшиеся этапы + итог
         self.assertEqual(self.last_job()["status"], "done")
+
+    async def test_rate_limit_waits_longer_and_shows_reason(self):
+        _, job = await self.plan_coventry()
+        FakeOpenAI.fail_on = {1, 2}
+        FakeOpenAI.error_code = "rate_limit_exceeded"
+        FakeOpenAI.error_status = 429
+        replies = await self.run_job(job)
+        text = "\n".join(texts(replies))
+        self.assertEqual(self.delays, [library_article.RATE_LIMIT_DELAY])
+        self.assertIn("ИИ не ответил (OpenAIError · HTTP 429 · code=rate_limit_exceeded)", text)
+        self.assertNotIn("SECRET", text)
+        errors = self.query("SELECT error FROM library_article_calls ORDER BY id")
+        self.assertEqual(errors[0][0], "OpenAIError · HTTP 429 · code=rate_limit_exceeded")
+
+    async def test_quota_is_not_retried(self):
+        _, job = await self.plan_coventry()
+        FakeOpenAI.fail_on = {1, 2}
+        FakeOpenAI.error_code = "insufficient_quota"
+        replies = await self.run_job(job)
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+        self.assertIn("в OpenAI закончился баланс", "\n".join(texts(replies)))
 
     async def test_restart_does_not_spend_automatically(self):
         _, job = await self.plan_coventry()
