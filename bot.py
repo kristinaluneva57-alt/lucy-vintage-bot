@@ -3733,13 +3733,82 @@ def item_diagnostics(user_id, codes=None):
 
 ARTICLE_USAGE = (
     "📝 ДОСЬЕ ДЛЯ СТАТЬИ\n\n"
-    "Соберу всё важное по теме из книг библиотеки — со ссылками на книгу и страницу.\n\n"
+    "Прочитаю тему по всей библиотеке — все книги и все страницы, где она есть, — "
+    "и соберу досье со ссылками на книгу и страницу и отчётом о полноте.\n"
+    "Перед платным исследованием покажу план и стоимость.\n\n"
     "Примеры:\n"
     "/article Sarah Coventry\n"
     "/article бакелит\n"
     "/article Trifari\n\n"
     "Имена, фирмы и дизайнеров пиши латиницей, как в книгах."
 )
+
+ARTICLE_PROBLEMS = {
+    "disabled": "пересказы по книгам выключены (LUCY_LIBRARY_AI_ENABLED)",
+    "no_key": "не настроен ИИ",
+    "quota": "в OpenAI закончился баланс",
+    "error": "ИИ не ответил",
+}
+
+
+def article_buttons(job_id, start_label):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(start_label, callback_data=f"art:go:{job_id}"),
+        InlineKeyboardButton("✖️ Отмена", callback_data=f"art:no:{job_id}"),
+    ]])
+
+
+async def send_article_result(message, job_id):
+    job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
+    lines = await asyncio.to_thread(library_article.result_lines, DB_PATH, job)
+    await send_long(message, lines)
+    body = await asyncio.to_thread(library_article.file_text, DB_PATH, job)
+    try:
+        await message.reply_document(
+            document=BytesIO(body.encode("utf-8")),
+            filename=library_article.file_name(job["topic"]),
+        )
+    except Exception as error:
+        print(f"Article file failed: {type(error).__name__}: {error}")
+
+
+async def article_worker(message, job_id):
+    try:
+        status = await library_article.run_job(DB_PATH, job_id, message.reply_text)
+    except Exception as error:
+        print(f"Article job failed: {type(error).__name__}: {error}")
+        await asyncio.to_thread(library_article.set_status, DB_PATH, job_id, "paused", type(error).__name__)
+        status = "paused"
+    if status == "done":
+        await send_article_result(message, job_id)
+        return
+    job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
+    reason = ARTICLE_PROBLEMS.get(job.get("error"), job.get("error") or "сбой")
+    await message.reply_text(
+        f"⏸ Исследование «{job['topic']}» остановилось: {reason}.\n"
+        "Сделанные этапы сохранены. Продолжить: "
+        f"/article {job['topic']}"
+    )
+
+
+async def start_article(message, context, job_id):
+    """Проверки бюджета и запуск исследования в фоне."""
+    job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
+    if job is None or job["status"] in ("done", "cancelled"):
+        await message.reply_text("Это исследование уже закрыто. Начни заново: /article тема")
+        return
+    if library_article.any_running():
+        await message.reply_text("⏳ Люся уже собирает другое досье. Запусти это, когда оно придёт.")
+        return
+    estimate = await asyncio.to_thread(library_article.remaining_estimate, DB_PATH, job)
+    problem = await asyncio.to_thread(library_article.budget_problem, DB_PATH, estimate)
+    if problem:
+        await message.reply_text(f"💵 Не запускаю: {problem}.")
+        return
+    await message.reply_text(
+        f"▶️ Начала исследование «{job['topic']}». Пришлю результат сюда."
+    )
+    context.application.create_task(article_worker(message, job_id))
 
 
 @admin_only
@@ -3755,75 +3824,84 @@ async def article_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    plan = library_search.build_search_plan(topic)
-    skipped = ""
-    if plan.unknown_words:
-        skipped = (
-            "\n\nЭтих слов нет в словаре Люси, по ним не искала: "
-            + ", ".join(plan.unknown_words[:8])
-            + ". Имена и фирмы напиши латиницей, как в книге."
-        )
     try:
-        results = await asyncio.to_thread(
-            library_search.search_pages, DB_PATH, plan, library_article.SEARCH_LIMIT
-        )
-        fragments = library_article.select_fragments(results)
         key = await asyncio.to_thread(library_article.topic_key, DB_PATH, topic)
-        cached = await asyncio.to_thread(library_article.find_cached, DB_PATH, key)
-        made = await asyncio.to_thread(library_article.made_today, DB_PATH)
+        job = await asyncio.to_thread(library_article.find_job, DB_PATH, key)
+    except Exception as error:
+        print(f"Article lookup failed: {type(error).__name__}: {error}")
+        await message.reply_text("❌ Не получилось прочитать библиотеку.")
+        return
+
+    if job and job["status"] == "done":
+        await send_article_result(message, job["id"])
+        return
+    if job and library_article.is_running(job["id"]):
+        await message.reply_text(f"⏳ Уже собираю досье «{job['topic']}». Результат придёт сюда.")
+        return
+    if job:
+        # Прерванное или ещё не запущенное исследование: только по кнопке.
+        lines = await asyncio.to_thread(library_article.plan_lines, DB_PATH, job)
+        if job["status"] in ("running", "paused"):
+            lines.insert(1, "⏸ Это исследование уже начиналось — сделанные этапы сохранены.")
+        await message.reply_text(
+            "\n".join(lines), reply_markup=article_buttons(job["id"], "▶️ Продолжить")
+        )
+        return
+
+    try:
+        research = await asyncio.to_thread(library_article.build_research, DB_PATH, topic)
     except Exception as error:
         print(f"Article search failed: {type(error).__name__}: {error}")
         await message.reply_text("❌ Не получилось прочитать библиотеку.")
         return
 
-    if not fragments:
-        await message.reply_text(f"🔎 В книгах библиотеки не нашла ничего по теме «{topic}».{skipped}")
+    if not research["fragments"]:
+        lines = [f"🔎 В книгах библиотеки не нашла содержательных страниц по теме «{topic}»."]
+        service = research["report"]["service_pages"]
+        if service:
+            lines.append(
+                "Тема есть только в оглавлениях или указателях: "
+                + ", ".join(f"{code} стр. {page}" for code, _, page in service[:10])
+            )
+        if research["unknown_words"]:
+            lines.append(
+                "Не искала по словам (нет в словаре): " + ", ".join(research["unknown_words"][:8])
+                + ". Имена и фирмы пиши латиницей, как в книге."
+            )
+        await message.reply_text("\n".join(lines))
         return
 
-    if cached:
-        dossier, fragments = cached
-    else:
-        if made >= library_article.daily_limit():
-            await message.reply_text(
-                f"На сегодня досье закончились (до {library_article.daily_limit()} в день). "
-                "Уже собранные темы открываются без лимита."
-            )
-            return
-        await message.reply_text(
-            f"⏳ Нашла {len(fragments)} фрагментов в {library_article.book_count(fragments)} "
-            "книг(ах). Собираю досье — это займёт около минуты."
-        )
-        try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        except Exception:
-            pass
-        try:
-            dossier = await asyncio.to_thread(library_article.ask, fragments, topic)
-        except lucy_ai.AIUnavailable as problem:
-            if problem.reason == "quota":
-                await notify_admin_ai_problem(context, problem.reason)
-            await message.reply_text("❌ ИИ сейчас не ответил. Попробуй ещё раз чуть позже.")
-            return
-        except Exception as error:
-            print(f"Article AI failed: {type(error).__name__}")
-            await message.reply_text("❌ ИИ сейчас не ответил. Попробуй ещё раз чуть позже.")
-            return
-        try:
-            await asyncio.to_thread(library_article.save, DB_PATH, key, topic, dossier, fragments)
-        except Exception as error:
-            print(f"Article save failed: {type(error).__name__}: {error}")
+    job_id = await asyncio.to_thread(
+        library_article.create_job, DB_PATH, key, topic, update.effective_user.id, research
+    )
+    if research["estimate"] <= library_article.confirm_usd() and not library_article.any_running():
+        await start_article(message, context, job_id)
+        return
+    job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
+    lines = await asyncio.to_thread(library_article.plan_lines, DB_PATH, job)
+    await message.reply_text("\n".join(lines), reply_markup=article_buttons(job_id, "▶️ Запустить"))
 
-    lines = library_article.message_lines(topic, dossier, fragments)
-    if skipped:
-        lines.append(skipped.strip())
-    await send_long(message, lines)
-    document = BytesIO(library_article.file_text(topic, dossier, fragments).encode("utf-8"))
+
+async def article_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🔒 Команда доступна только администратору.")
+        return
     try:
-        await message.reply_document(
-            document=document, filename=library_article.file_name(topic)
-        )
-    except Exception as error:
-        print(f"Article file failed: {type(error).__name__}: {error}")
+        _, action, job_id = query.data.split(":")
+        job_id = int(job_id)
+    except ValueError:
+        return
+    if action == "no":
+        if library_article.is_running(job_id):
+            await query.message.reply_text("⏳ Исследование уже идёт — дождись результата.")
+            return
+        await asyncio.to_thread(library_article.set_status, DB_PATH, job_id, "cancelled")
+        await query.message.reply_text("✖️ Исследование отменено. Новые этапы не запускаются и не оплачиваются.")
+        return
+    if action == "go":
+        await start_article(query.message, context, job_id)
 
 
 @admin_only
@@ -3944,6 +4022,7 @@ def main():
     app.add_handler(CallbackQueryHandler(open_details, pattern=r"^details:"))
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
+    app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^art:"))
     app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vpre|vattr|vsrc|vsave):"))
     app.add_handler(CallbackQueryHandler(quick_callback, pattern=r"^(qskip|qmark|qmok|qmtype|qmskip|qmore):"))
     app.add_handler(

@@ -351,7 +351,7 @@ def _page_regexes(plan):
     ]
 
 
-def search_pages(db_path, plan, limit=MAX_RESULTS):
+def search_pages(db_path, plan, limit=MAX_RESULTS, max_candidates=MAX_CANDIDATES):
     """Ищет страницы по плану. Возвращает список результатов по убыванию
     релевантности: dict(title, language, pdf_page, printed_page, text,
     original_text, document_code, matched=[термины], position,
@@ -380,7 +380,7 @@ def search_pages(db_path, plan, limit=MAX_RESULTS):
             WHERE COALESCE(d.storage_key, '') LIKE 'books/%'
               AND ({where})
             ORDER BY d.id, p.pdf_page
-            LIMIT {MAX_CANDIDATES}
+            LIMIT {int(max_candidates)}
             """,
             [_like_value(term) for term in terms],
         ).fetchall()
