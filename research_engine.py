@@ -78,6 +78,7 @@ MODES = {
         "web_per_query": 4,
         "synth_tokens": 4000,
         "critic": True,
+        "targeted": True,
     },
 }
 
@@ -158,6 +159,7 @@ CRITIC_SYSTEM = """You check a draft attribution of a vintage jewelry piece agai
 Return a JSON object: {"unsupported": ["c3"], "overstated": ["c5"], "notes": ["short Russian remarks"]}.
 unsupported — the sources do not say this. overstated — the source supports only a weaker version (move to assumptions)."""
 
+TARGET_LABELS = {"auction": "аукционы", "museum": "музеи", "reference": "справочники клейм"}
 CONFIDENCE_LABELS = {"low": "низкая", "medium": "средняя", "high": "высокая"}
 PRICE_LABELS = {
     "sold": "продажа на аукционе",
@@ -569,18 +571,36 @@ def library_evidence(db_path, card, observation, config):
     return pages, query
 
 
+TARGETED = (
+    ("auction", "{key} jewelry auction sold", AUCTION_DOMAINS),
+    ("museum", "{key} jewelry", MUSEUM_DOMAINS),
+    ("reference", "{key} mark", REFERENCE_DOMAINS),
+)
+
+
 def web_queries(card, observation, config):
-    queries = _strings(observation.get("web_queries"), config["web_queries"])
+    """Общие запросы из наблюдения; в глубоком режиме ещё и целевые:
+    аукционы (реальные продажи), музеи, справочники клейм и патенты."""
+    limit = config["web_queries"]
     mark = attribution.owner_mark(card)
+    queries = _strings(observation.get("web_queries"), limit)
     if mark and not any(mark.lower() in q.lower() for q in queries):
         queries.insert(0, f"{mark} jewelry mark")
-    return queries[:config["web_queries"]]
+    if not config.get("targeted"):
+        return queries[:limit]
+    key = mark or next(iter(_strings(observation.get("library_terms"), 1)), "") or (queries[0] if queries else "")
+    targeted = [
+        {"query": template.format(key=key)[:200], "include_domains": sorted(domains), "target": name}
+        for name, template, domains in TARGETED if key
+    ]
+    general = queries[:max(0, limit - len(targeted))]
+    return general + targeted
 
 
 def web_evidence(db_path, provider, queries, config, user_id, research_id):
     """Найденные страницы + учёт кредитов поиска."""
     if not provider.connected or not queries:
-        return []
+        return [], None
     credits = provider.credits_for(queries, config["web_depth"])
     estimate_usd = credits * search_price_per_credit()
     try:
@@ -594,10 +614,10 @@ def web_evidence(db_path, provider, queries, config, user_id, research_id):
         found = provider.search(queries, depth=config["web_depth"], per_query=config["web_per_query"])
     except web_search.SearchUnavailable as error:
         ai_ledger.fail(db_path, call_id, f"{error.reason}: {error.details}", response_received=True)
-        return []
+        return [], error.details or error.reason
     except Exception as error:
         ai_ledger.fail(db_path, call_id, type(error).__name__, response_received=False)
-        return []
+        return [], f"сбой поиска: {type(error).__name__}"
     ai_ledger.settle(db_path, call_id, estimate_usd, units=credits)
     sources, seen = [], set()
     for item in found:
@@ -611,9 +631,9 @@ def web_evidence(db_path, provider, queries, config, user_id, research_id):
             "title": (item.get("title") or web_search.domain_of(url))[:200],
             "domain": web_search.domain_of(url),
             "content": (item.get("content") or "")[:WEB_CONTENT_CHARS],
-            "query": item.get("query"),
+            "query": item.get("query") if isinstance(item.get("query"), str) else (item.get("query") or {}).get("query"),
         })
-    return sources
+    return sources, None
 
 
 def _source_blocks(books, web):
@@ -825,7 +845,7 @@ def run(db_path, research_id, photos, provider=None):
         )
         books, library_query = library_evidence(db_path, card, observation, config)
         queries = web_queries(card, observation, config)
-        web = web_evidence(db_path, provider, queries, config, user_id, research_id)
+        web, web_problem = web_evidence(db_path, provider, queries, config, user_id, research_id)
 
         synth_photos, synth_seen = _photo_content(photos, min(2, config["photos"]))
         text = (
@@ -872,6 +892,7 @@ def run(db_path, research_id, photos, provider=None):
         "library_query": library_query,
         "web_queries": queries,
         "web_provider": provider.name if provider.connected else None,
+        "web_problem": web_problem,
         "metrics": metrics,
     })
     _finish(db_path, research_id, "done", result=result)
@@ -947,7 +968,14 @@ def report_lines(record):
     lines.append(f"— книги: {len(result['books'])} стр. найдено по тексту карточки и описанию"
                  + (f" (запрос: {result['library_query'][:80]})" if result.get("library_query") else ""))
     if result.get("web_provider"):
-        lines.append(f"— интернет: {len(result['web_queries'])} запросов, {len(result['web'])} страниц")
+        targeted = [q.get("target") for q in result["web_queries"] if isinstance(q, dict)]
+        lines.append(
+            f"— интернет ({result['web_provider']}): {len(result['web_queries'])} запросов, "
+            f"{len(result['web'])} страниц"
+            + (f"; целевые: {', '.join(TARGET_LABELS.get(t, t) for t in targeted)}" if targeted else "")
+        )
+        if result.get("web_problem"):
+            lines.append(f"— ⚠️ интернет-поиск не сработал: {result['web_problem']}")
     else:
         lines.append("— интернет-поиск не подключён: только книги и фото")
     lines.append("— фото рассмотрела модель; поиска по картинкам нет — аналоги найдены по тексту")

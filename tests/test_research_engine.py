@@ -331,6 +331,13 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(texts(replies))
         self.assertEqual(len(FakeOpenAI.calls), 3)
         self.assertEqual(self.web.calls[0][1], "advanced")
+        queries = self.web.calls[0][0]
+        self.assertEqual(len(queries), 6)  # 2 из наблюдения + клеймо + 3 целевых; лимит 8 не добивается выдумками
+        targeted = [q for q in queries if isinstance(q, dict)]
+        self.assertEqual([q["target"] for q in targeted], ["auction", "museum", "reference"])
+        self.assertIn("liveauctioneers.com", targeted[0]["include_domains"])
+        self.assertEqual(targeted[0]["query"], "SARAH COV. jewelry auction sold")
+        self.assertIn("целевые: аукционы, музеи, справочники клейм", text)
         self.assertIn("🧭 Глубокая атрибуция", text)
         self.assertIn("замечания проверки: сверено", text)
         self.assertEqual(self.last_research()["result"]["metrics"]["removed"], 6)  # 5 + критик
@@ -342,6 +349,17 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("интернет-поиск не подключён", text)
         self.assertNotIn("https://", text)
         self.assertEqual(self.web.calls, [])
+
+    async def test_search_error_is_reported(self):
+        def broken(*args, **kwargs):
+            raise web_search.SearchUnavailable("auth", "Tavily: неверный ключ (HTTP 401)")
+
+        self.web.search = broken
+        text = "\n".join(texts(await self.run_research()))
+        self.assertIn("⚠️ интернет-поиск не сработал: Tavily: неверный ключ (HTTP 401)", text)
+        self.assertEqual(self.last_research()["status"], "done")  # книги и фото всё равно
+        failed = self.query("SELECT status FROM ai_spend WHERE kind = 'web_search'")
+        self.assertEqual(failed, [("failed",)])  # неудачный поиск не считается расходом
 
     async def test_budget_stops_research(self):
         with mock.patch.dict(os.environ, {"LUCY_AI_BUDGET_MONTH_USD": "0.0001"}):
