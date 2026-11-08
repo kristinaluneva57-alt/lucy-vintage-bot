@@ -18,13 +18,14 @@ import types
 import unittest
 from unittest import mock
 
-from helpers import FakeChat, buttons, load_bot, texts
+from helpers import FakeChat, FakeMessage, buttons, load_bot, texts
 
 bot = load_bot()
 import ai_ledger  # noqa: E402
 import library_db  # noqa: E402
 import library_importer  # noqa: E402
 import lucy_ai  # noqa: E402
+import access  # noqa: E402
 import research_engine  # noqa: E402
 import web_search  # noqa: E402
 
@@ -133,6 +134,7 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         bot.init_db()
         library_db.init_library_db()
         research_engine.init_tables(path)
+        access.init_tables(path)
         bot.attribution.init_tables(path)
         bot.visual_ai.init_tables(path)
 
@@ -166,6 +168,10 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
             "LUCY_RESEARCH_ENABLED": "1",
             "LUCY_RESEARCH_MODEL": "gpt-4.1",
             "LUCY_AI_BUDGET_MONTH_USD": "11",
+            "LUCY_PILOT_CODE": "omg2026",
+            "LUCY_PILOT_MAX": "10",
+            "LUCY_PILOT_RESEARCH_MONTH": "4",
+            "LUCY_PILOT_DEEP_MONTH": "1",
         })
         self.env.start()
         self.patches = [
@@ -419,6 +425,74 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         status = self.query("SELECT attribution_status FROM items WHERE item_code = 'OMG-000006'")[0][0]
         self.assertIn("Брошь Sarah Coventry — предварительно, уверенность высокая", status)
         self.assertEqual(len(FakeOpenAI.calls), 2)  # открыть и записать — бесплатно
+
+    # --- пилот и лимиты ---
+
+    async def join(self, chat, code="omg2026"):
+        chat.context.args = [f"pilot-{code}"]
+        await chat.bot.start(chat._update(message=FakeMessage(chat, text="/start")), chat.context)
+        chat.context.args = []
+        return texts(chat.sent[-2:])
+
+    async def test_pilot_invite(self):
+        self.assertIn("не подходит", (await self.join(self.user, "wrong"))[0])
+        self.assertEqual(access.role_of(bot.DB_PATH, 1), "member")
+        self.assertIn("Добро пожаловать в пилот", (await self.join(self.user))[0])
+        self.assertEqual(access.role_of(bot.DB_PATH, 1), "pilot")
+        self.assertIn("уже в пилоте", (await self.join(self.user))[0])
+        with mock.patch.dict(os.environ, {"LUCY_PILOT_MAX": "1"}):
+            self.assertIn("заняты", (await self.join(FakeChat(bot, 2)))[0])
+        with mock.patch.dict(os.environ, {"LUCY_PILOT_CODE": ""}):
+            self.assertIn("закрыт", (await self.join(FakeChat(bot, 3)))[0])
+
+    async def test_pilot_can_research_within_limit(self):
+        await self.join(self.user)
+        replies = await self.user.press("vpre:OMG-000007")
+        self.assertIn("rs:new:OMG-000007:research", buttons(replies))
+        replies = await self.user.press("rs:new:OMG-000007:research")
+        self.assertIn("Осталось в этом месяце: 4 из 4", texts(replies)[0])
+        record = self.last_research()
+        await self.user.press(f"rs:go:{record['id']}")
+        await self.user.run_tasks()
+        self.assertEqual(self.last_research()["status"], "done")
+        self.assertEqual(access.used_this_month(bot.DB_PATH, 1, "research"), 1)
+
+        # Те же данные — из кэша, лимит не тратится.
+        replies = await self.user.press("rs:new:OMG-000007:research")
+        self.assertIn("уже готово", texts(replies)[0])
+        self.assertEqual(access.used_this_month(bot.DB_PATH, 1, "research"), 1)
+
+    async def test_pilot_limit_blocks(self):
+        await self.join(self.user)
+        with mock.patch.dict(os.environ, {"LUCY_PILOT_DEEP_MONTH": "1"}):
+            await self.user.press("rs:new:OMG-000007:deep")
+            first = self.last_research()
+            await self.user.press(f"rs:go:{first['id']}")
+            await self.user.run_tasks()
+            conn = sqlite3.connect(bot.DB_PATH)
+            conn.execute("UPDATE items SET notes = 'новое описание' WHERE item_code = 'OMG-000007'")
+            conn.commit()
+            conn.close()
+            calls = len(FakeOpenAI.calls)
+            replies = await self.user.press("rs:new:OMG-000007:deep")
+            self.assertIn("Лимит на этот месяц исчерпан (1 из 1)", texts(replies)[0])
+            self.assertEqual(len(FakeOpenAI.calls), calls)
+
+    async def test_member_and_admin_access(self):
+        replies = await self.user.press("rs:new:OMG-000007:research")
+        self.assertIn("только в пилоте", texts(replies)[0])
+        replies = await self.admin.say("/research OMG-000006")
+        self.assertNotIn("Осталось в этом месяце", texts(replies)[0])  # у администратора нет личного лимита
+
+    async def test_pilot_admin_command(self):
+        await self.join(self.user)
+        text = texts(await self.admin.say("/pilot"))[0]
+        self.assertIn("ПИЛОТ ЛЮСИ: 1 из 10", text)
+        self.assertIn("?start=pilot-omg2026", text)
+        self.assertIn("• 1: исследований 0, глубоких 0", text)
+        self.assertIn("только администратору", texts(await self.user.say("/pilot"))[0])
+        self.assertIn("выведена", texts(await self.admin.say("/pilot remove 1"))[0])
+        self.assertEqual(access.role_of(bot.DB_PATH, 1), "member")
 
     async def test_foreign_card_cannot_be_researched(self):
         replies = await self.admin.say("/research OMG-000007")

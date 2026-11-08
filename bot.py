@@ -9,6 +9,7 @@ import library_search
 import library_ai
 import library_article
 import research_engine
+import access
 import web_search
 import ai_ledger
 import library_catalog
@@ -1289,10 +1290,35 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Фото клейма и деталей пока нет. 📸")
 
 
+PILOT_REPLIES = {
+    "joined": (
+        "🎉 Добро пожаловать в пилот Люси!\n\n"
+        "Тебе открыто исследование украшений: добавь находку в «🗃️ Моя шкатулка», "
+        "открой карточку → «🔬 Исследовать по библиотеке» → «🔬 Исследование Люси». "
+        "Люся рассмотрит фото, прочитает книги нашей библиотеки и проверит каждый вывод "
+        "по источникам. Это исследование, а не экспертиза: Люся честно скажет, "
+        "что подтверждено, а что только предполагается."
+    ),
+    "already": "Ты уже в пилоте Люси. 🙂",
+    "full": "😔 Места в пилоте уже заняты. Я запомню — напиши Кристине, если хочешь в следующую группу.",
+    "bad_code": "Эта ссылка-приглашение не подходит. Спроси у Кристины актуальную.",
+    "closed": "Набор в пилот сейчас закрыт.",
+}
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start выводит из незаконченной анкеты.
     reset_anketa(context)
     context.user_data.pop("ai_history", None)
+
+    args = context.args or []
+    if args and args[0].lower().startswith("pilot-"):
+        result = await asyncio.to_thread(
+            access.join_pilot, DB_PATH, update.effective_user.id, args[0][len("pilot-"):]
+        )
+        await update.message.reply_text(PILOT_REPLIES[result])
+        if result == "joined":
+            print(f"Pilot joined: {update.effective_user.id}")
 
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
@@ -3985,6 +4011,9 @@ async def offer_research(message, user_id, item_code, mode):
             "✏️ Редактировать → 📸 Добавить фото."
         )
         return
+    if not research_allowed(user_id):
+        await message.reply_text("🔬 Исследование Люси пока доступно только в пилоте.")
+        return
     state, record = await asyncio.to_thread(
         research_engine.plan, DB_PATH, item_code, user_id, data["card"], mode,
         [file_id for _, file_id in data["photos"]],
@@ -3996,7 +4025,18 @@ async def offer_research(message, user_id, item_code, mode):
     if state == "running":
         await message.reply_text("🔬 Исследование уже идёт — дождись результата, пожалуйста.")
         return
+    allowed, left, limit = await asyncio.to_thread(access.research_quota, DB_PATH, user_id, mode)
+    if not allowed:
+        await asyncio.to_thread(research_engine.cancel, DB_PATH, record["id"], user_id)
+        await message.reply_text(
+            f"🔬 Лимит на этот месяц исчерпан ({limit} из {limit}). "
+            "Готовые исследования в карточках открываются бесплатно."
+        )
+        return
     lines = research_engine.plan_lines(record)
+    line = quota_line(user_id, mode)
+    if line:
+        lines.append(line)
     await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[
         InlineKeyboardButton("▶️ Запустить", callback_data=f"rs:go:{record['id']}"),
         InlineKeyboardButton("✖️ Отмена", callback_data=f"rs:no:{record['id']}"),
@@ -4015,8 +4055,15 @@ async def send_research(message, research_id):
 
 
 def research_allowed(user_id):
-    """Кто может запускать исследования Люси. Пока — администратор."""
-    return is_admin(user_id)
+    """Исследования Люси: администратор и участницы пилота."""
+    return access.role_of(DB_PATH, user_id) in (access.ROLE_ADMIN, access.ROLE_PILOT)
+
+
+def quota_line(user_id, mode):
+    allowed, left, limit = access.research_quota(DB_PATH, user_id, mode)
+    if limit is None:
+        return None
+    return f"Осталось в этом месяце: {left} из {limit}. Спишется только после «Запустить»."
 
 
 def research_card_line(record):
@@ -4116,6 +4163,13 @@ async def research_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if record["status"] == "done":
         await send_research(query.message, research_id)
         return
+    allowed, _, limit = await asyncio.to_thread(access.research_quota, DB_PATH, user_id, record["mode"])
+    if not research_allowed(user_id) or not allowed:
+        await query.message.reply_text(
+            "🔬 Запустить нельзя: исследование доступно в пилоте, "
+            f"и месячный лимит{f' ({limit})' if limit else ''} должен быть не исчерпан."
+        )
+        return
     if not await asyncio.to_thread(research_engine.claim, DB_PATH, research_id, user_id):
         await query.message.reply_text("🔬 Это исследование уже запущено или закрыто — повторно не запускаю.")
         return
@@ -4128,6 +4182,35 @@ async def research_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(
         research_worker(query.message, context, research_id, user_id, data["photos"][:6])
     )
+
+
+@admin_only
+async def pilot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if len(args) == 2 and args[0].lower() == "remove" and args[1].isdigit():
+        removed = await asyncio.to_thread(access.remove, DB_PATH, int(args[1]))
+        await update.message.reply_text("Участница выведена из пилота." if removed else "Такой участницы в пилоте нет.")
+        return
+    await asyncio.to_thread(access.init_tables, DB_PATH)
+    members = await asyncio.to_thread(access.pilots, DB_PATH)
+    username = getattr(context.bot, "username", None) or "LucyVintageBot"
+    code = access.pilot_code()
+    lines = [f"🧪 ПИЛОТ ЛЮСИ: {len(members)} из {access.pilot_max()}"]
+    if code:
+        lines.append(f"Ссылка-приглашение: https://t.me/{username}?start=pilot-{code}")
+    else:
+        lines.append("Набор закрыт: задай LUCY_PILOT_CODE в Railway, чтобы появилась ссылка.")
+    lines.append(
+        f"Лимиты в месяц: исследование {access.monthly_limit(access.ROLE_PILOT, 'research')}, "
+        f"глубокая атрибуция {access.monthly_limit(access.ROLE_PILOT, 'deep')}."
+    )
+    for user_id in members:
+        research = await asyncio.to_thread(access.used_this_month, DB_PATH, user_id, "research")
+        deep = await asyncio.to_thread(access.used_this_month, DB_PATH, user_id, "deep")
+        lines.append(f"• {user_id}: исследований {research}, глубоких {deep}")
+    if members:
+        lines.append("Вывести из пилота: /pilot remove ID")
+    await update.message.reply_text("\n".join(lines))
 
 
 @admin_only
@@ -4176,6 +4259,7 @@ def text_commands():
         "itemcheck": itemcheck_command,
         "article": article_command,
         "research": research_command,
+        "pilot": pilot_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -4205,7 +4289,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research, /pilot"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -4231,6 +4315,7 @@ def main():
     library_ai.init_tables(DB_PATH)
     library_article.init_tables(DB_PATH)
     research_engine.init_tables(DB_PATH)
+    access.init_tables(DB_PATH)
     ai_ledger.init_tables(DB_PATH)
     ai_ledger.notifier = notify_admin
     attribution.init_tables(DB_PATH)
@@ -4261,6 +4346,7 @@ def main():
     app.add_handler(CommandHandler("itemcheck", itemcheck_command))
     app.add_handler(CommandHandler("article", article_command))
     app.add_handler(CommandHandler("research", research_command))
+    app.add_handler(CommandHandler("pilot", pilot_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
