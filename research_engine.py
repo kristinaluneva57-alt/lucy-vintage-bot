@@ -272,6 +272,10 @@ def get(db_path, research_id):
 def latest_for_item(db_path, item_code):
     conn = _connect(db_path)
     try:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'item_research'"
+        ).fetchone():
+            return None
         return _row(conn.execute(
             f"SELECT {_COLUMNS} FROM item_research WHERE item_code = ? AND status = 'done' "
             "ORDER BY id DESC LIMIT 1",

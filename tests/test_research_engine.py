@@ -133,6 +133,8 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         bot.init_db()
         library_db.init_library_db()
         research_engine.init_tables(path)
+        bot.attribution.init_tables(path)
+        bot.visual_ai.init_tables(path)
 
         conn = sqlite3.connect(path)
         conn.execute(
@@ -212,7 +214,10 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         conn.execute(
             "CREATE TABLE IF NOT EXISTS visual_ai_calls (status TEXT, cost_usd REAL, reserved_usd REAL, created_at TEXT)"
         )
-        conn.execute("INSERT INTO visual_ai_calls VALUES ('done', 3.0, 0, ?)", (ai_ledger._stamp(),))
+        conn.execute(
+            "INSERT INTO visual_ai_calls (kind, model, status, cost_usd, reserved_usd, created_at) "
+            "VALUES ('compare', 'gpt-4.1-mini', 'done', 3.0, 0, ?)", (ai_ledger._stamp(),),
+        )
         conn.commit()
         conn.close()
         self.assertAlmostEqual(ai_ledger.month_total(path), 7.0)
@@ -376,6 +381,44 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(texts(await self.run_research()))
         self.assertIn("ИИ не ответил (OpenAIError · HTTP 404 · code=model_not_found)", text)
         self.assertNotIn("SECRET", text)
+
+    # --- карточка шкатулки ---
+
+    async def test_preview_offers_new_modes_to_allowed_only(self):
+        replies = await self.admin.press("vpre:OMG-000006")
+        self.assertIn("rs:new:OMG-000006:research", buttons(replies))
+        self.assertIn("rs:new:OMG-000006:deep", buttons(replies))
+        self.assertIn("vattr:OMG-000006", buttons(replies))  # старое исследование на месте
+        self.assertIn("исследование Люси", texts(replies)[0])
+        replies = await self.user.press("vpre:OMG-000007")
+        self.assertNotIn("rs:new:OMG-000007:research", buttons(replies))
+        replies = await self.user.press("rs:new:OMG-000007:research")
+        self.assertIn("только в пилоте", texts(replies)[0])
+
+    async def test_card_button_starts_plan(self):
+        replies = await self.admin.press("rs:new:OMG-000006:deep")
+        self.assertIn("🧭 Глубокая атрибуция · OMG-000006", texts(replies)[0])
+        self.assertEqual(FakeOpenAI.calls, [])
+
+    async def test_card_shows_research_and_saves_status(self):
+        await self.run_research()
+        record = self.last_research()
+        replies = await self.admin.press("item:OMG-000006")
+        card = "\n".join(texts(replies))
+        self.assertIn("🔬 Исследование Люси: Брошь Sarah Coventry (уверенность: высокая)", card)
+        self.assertIn(f"rs:open:{record['id']}", buttons(replies))
+
+        replies = await self.admin.press(f"rs:open:{record['id']}")
+        self.assertIn("🧾 Предварительно: Брошь Sarah Coventry", texts(replies)[0])
+        self.assertIn(f"rs:save:{record['id']}", buttons(replies))
+
+        replies = await self.user.press(f"rs:save:{record['id']}")
+        self.assertIn("не твоё", texts(replies)[0])
+        replies = await self.admin.press(f"rs:save:{record['id']}")
+        self.assertIn("Вывод записан", texts(replies)[0])
+        status = self.query("SELECT attribution_status FROM items WHERE item_code = 'OMG-000006'")[0][0]
+        self.assertIn("Брошь Sarah Coventry — предварительно, уверенность высокая", status)
+        self.assertEqual(len(FakeOpenAI.calls), 2)  # открыть и записать — бесплатно
 
     async def test_foreign_card_cannot_be_researched(self):
         replies = await self.admin.say("/research OMG-000007")

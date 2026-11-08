@@ -9,6 +9,7 @@ import library_search
 import library_ai
 import library_article
 import research_engine
+import web_search
 import ai_ledger
 import library_catalog
 import attribution
@@ -738,6 +739,7 @@ async def show_item_card(message, item_code, user_id):
 
     extra_photos = get_item_photos(item_code)
     extra_count = len(extra_photos)
+    latest_research = research_engine.latest_for_item(DB_PATH, item_code)
     has_mark_photo = bool(mark_photo) or any(kind == "mark" for kind, _ in extra_photos)
     notes_block = f"─── ОПИСАНИЕ ───\n{notes}\n\n" if notes else ""
     extra_line = (
@@ -756,7 +758,8 @@ async def show_item_card(message, item_code, user_id):
         f"{extra_line}\n"
         f"{notes_block}"
         "─── АТРИБУЦИЯ ───\n"
-        f"◇ Статус: {attribution_status or 'не определено'}\n\n"
+        f"◇ Статус: {attribution_status or 'не определено'}\n"
+        f"{research_card_line(latest_research)}\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
         f"{seller_story or 'не указана'}"
     )
@@ -775,6 +778,9 @@ async def show_item_card(message, item_code, user_id):
             "🔬 Исследовать по библиотеке",
             callback_data=f"vpre:{item_code}"
         )],
+        *([[InlineKeyboardButton(
+            "📄 Исследование Люси", callback_data=f"rs:open:{latest_research['id']}"
+        )]] if latest_research else []),
         [InlineKeyboardButton(
             "✏️ Редактировать",
             callback_data=f"edit:{item_code}"
@@ -2565,13 +2571,29 @@ async def research_preview(message, context, item_code, user_id):
     else:
         lines.append(f"Режим: бесплатный поиск по книгам без ИИ — {reason}.")
 
-    await message.reply_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔬 Начать исследование", callback_data=f"vattr:{item_code}")],
-            [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
-        ]),
-    )
+    rows = []
+    if research_allowed(user_id) and research_engine.enabled():
+        lines += [
+            "",
+            "Новое — исследование Люси: модель рассматривает фото, читает книги целиком"
+            + (" и ищет в интернете" if web_search.get_provider().connected else "")
+            + ", а каждый вывод проверяется по источникам. Сначала покажу план и цену.",
+        ]
+        rows += [
+            [InlineKeyboardButton(
+                f"🔬 Исследование Люси (≈ {research_engine.estimate('research'):.2f} $)",
+                callback_data=f"rs:new:{item_code}:research",
+            )],
+            [InlineKeyboardButton(
+                f"🧭 Глубокая атрибуция (≈ {research_engine.estimate('deep'):.2f} $)",
+                callback_data=f"rs:new:{item_code}:deep",
+            )],
+        ]
+    rows += [
+        [InlineKeyboardButton("🔬 Начать исследование", callback_data=f"vattr:{item_code}")],
+        [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
+    ]
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def show_my_items(message, user_id):
@@ -3984,6 +4006,49 @@ async def offer_research(message, user_id, item_code, mode):
 async def send_research(message, research_id):
     record = await asyncio.to_thread(research_engine.get, DB_PATH, research_id)
     await send_long(message, research_engine.report_lines(record))
+    await message.reply_text(
+        "Записать предварительный вывод в статус карточки?",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💾 Записать вывод в карточку", callback_data=f"rs:save:{research_id}"),
+        ]]),
+    )
+
+
+def research_allowed(user_id):
+    """Кто может запускать исследования Люси. Пока — администратор."""
+    return is_admin(user_id)
+
+
+def research_card_line(record):
+    if not record or not record.get("result"):
+        return ""
+    ident = record["result"]["identification"]
+    summary = ident.get("summary") or "вывода нет"
+    confidence = research_engine.CONFIDENCE_LABELS[ident["confidence"]]
+    return f"🔬 Исследование Люси: {summary[:160]} (уверенность: {confidence})\n"
+
+
+def save_research_status(research_id, user_id):
+    """Записывает вывод исследования в статус своей карточки. True — записано."""
+    record = research_engine.get(DB_PATH, research_id)
+    if record is None or record["status"] != "done" or record["user_id"] != user_id:
+        return False
+    ident = record["result"]["identification"]
+    status = (
+        f"{ident.get('summary') or 'не определено'} — предварительно, уверенность "
+        f"{research_engine.CONFIDENCE_LABELS[ident['confidence']]} (исследование Люси №{research_id})"
+    )[:300]
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            f"UPDATE items SET attribution_status = ? WHERE item_code = ? AND {access}",
+            (status, record["item_code"], *params),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
 
 
 async def research_worker(message, context, research_id, user_id, photo_ids):
@@ -4012,14 +4077,35 @@ async def research_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    parts = query.data.split(":")
+    if len(parts) == 4 and parts[1] == "new":
+        if not research_allowed(user_id):
+            await query.message.reply_text("🔬 Исследование Люси пока доступно только в пилоте.")
+            return
+        mode = parts[3] if parts[3] in research_engine.MODES else "research"
+        await offer_research(query.message, user_id, parts[2], mode)
+        return
     try:
-        _, action, research_id = query.data.split(":")
+        _, action, research_id = parts
         research_id = int(research_id)
     except ValueError:
         return
     record = await asyncio.to_thread(research_engine.get, DB_PATH, research_id)
     if record is None or record["user_id"] != user_id:
         await query.message.reply_text("Это исследование не твоё. 🔎")
+        return
+    if action == "open":
+        if record["status"] == "done":
+            await send_research(query.message, research_id)
+        else:
+            await query.message.reply_text("Исследование ещё не готово.")
+        return
+    if action == "save":
+        saved = await asyncio.to_thread(save_research_status, research_id, user_id)
+        await query.message.reply_text(
+            "💾 Вывод записан в статус карточки — с пометкой «предварительно»."
+            if saved else "Не получилось записать: карточка недоступна или исследование не готово."
+        )
         return
     if action == "no":
         await asyncio.to_thread(research_engine.cancel, DB_PATH, research_id, user_id)
