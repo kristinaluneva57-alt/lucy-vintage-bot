@@ -3,9 +3,11 @@ import asyncio
 import sqlite3
 import re
 import time
+from io import BytesIO
 
 import library_search
 import library_ai
+import library_article
 import library_catalog
 import attribution
 import page_images
@@ -3729,6 +3731,101 @@ def item_diagnostics(user_id, codes=None):
     return lines
 
 
+ARTICLE_USAGE = (
+    "📝 ДОСЬЕ ДЛЯ СТАТЬИ\n\n"
+    "Соберу всё важное по теме из книг библиотеки — со ссылками на книгу и страницу.\n\n"
+    "Примеры:\n"
+    "/article Sarah Coventry\n"
+    "/article бакелит\n"
+    "/article Trifari\n\n"
+    "Имена, фирмы и дизайнеров пиши латиницей, как в книгах."
+)
+
+
+@admin_only
+async def article_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = " ".join(context.args or []).strip()[:library_article.MAX_TOPIC_CHARS]
+    message = update.message
+    if not topic:
+        await message.reply_text(ARTICLE_USAGE)
+        return
+    if not library_ai.enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
+        await message.reply_text(
+            "Досье сейчас не собрать: пересказы по книгам выключены или не настроен ИИ."
+        )
+        return
+
+    plan = library_search.build_search_plan(topic)
+    skipped = ""
+    if plan.unknown_words:
+        skipped = (
+            "\n\nЭтих слов нет в словаре Люси, по ним не искала: "
+            + ", ".join(plan.unknown_words[:8])
+            + ". Имена и фирмы напиши латиницей, как в книге."
+        )
+    try:
+        results = await asyncio.to_thread(
+            library_search.search_pages, DB_PATH, plan, library_article.SEARCH_LIMIT
+        )
+        fragments = library_article.select_fragments(results)
+        key = await asyncio.to_thread(library_article.topic_key, DB_PATH, topic)
+        cached = await asyncio.to_thread(library_article.find_cached, DB_PATH, key)
+        made = await asyncio.to_thread(library_article.made_today, DB_PATH)
+    except Exception as error:
+        print(f"Article search failed: {type(error).__name__}: {error}")
+        await message.reply_text("❌ Не получилось прочитать библиотеку.")
+        return
+
+    if not fragments:
+        await message.reply_text(f"🔎 В книгах библиотеки не нашла ничего по теме «{topic}».{skipped}")
+        return
+
+    if cached:
+        dossier, fragments = cached
+    else:
+        if made >= library_article.daily_limit():
+            await message.reply_text(
+                f"На сегодня досье закончились (до {library_article.daily_limit()} в день). "
+                "Уже собранные темы открываются без лимита."
+            )
+            return
+        await message.reply_text(
+            f"⏳ Нашла {len(fragments)} фрагментов в {library_article.book_count(fragments)} "
+            "книг(ах). Собираю досье — это займёт около минуты."
+        )
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        except Exception:
+            pass
+        try:
+            dossier = await asyncio.to_thread(library_article.ask, fragments, topic)
+        except lucy_ai.AIUnavailable as problem:
+            if problem.reason == "quota":
+                await notify_admin_ai_problem(context, problem.reason)
+            await message.reply_text("❌ ИИ сейчас не ответил. Попробуй ещё раз чуть позже.")
+            return
+        except Exception as error:
+            print(f"Article AI failed: {type(error).__name__}")
+            await message.reply_text("❌ ИИ сейчас не ответил. Попробуй ещё раз чуть позже.")
+            return
+        try:
+            await asyncio.to_thread(library_article.save, DB_PATH, key, topic, dossier, fragments)
+        except Exception as error:
+            print(f"Article save failed: {type(error).__name__}: {error}")
+
+    lines = library_article.message_lines(topic, dossier, fragments)
+    if skipped:
+        lines.append(skipped.strip())
+    await send_long(message, lines)
+    document = BytesIO(library_article.file_text(topic, dossier, fragments).encode("utf-8"))
+    try:
+        await message.reply_document(
+            document=document, filename=library_article.file_name(topic)
+        )
+    except Exception as error:
+        print(f"Article file failed: {type(error).__name__}: {error}")
+
+
 @admin_only
 async def itemcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codes = [arg.strip().upper() for arg in (context.args or []) if arg.strip()][:20]
@@ -3759,6 +3856,7 @@ def text_commands():
         "vindex": vindex_command,
         "vstats": vstats_command,
         "itemcheck": itemcheck_command,
+        "article": article_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -3788,7 +3886,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -3812,6 +3910,7 @@ def main():
     init_knowledge_bridge()
     lucy_ai.init_ai_usage_table(DB_PATH)
     library_ai.init_tables(DB_PATH)
+    library_article.init_tables(DB_PATH)
     attribution.init_tables(DB_PATH)
     seed_books()
     seed_knowledge()
@@ -3838,6 +3937,7 @@ def main():
     app.add_handler(CommandHandler("vindex", vindex_command))
     app.add_handler(CommandHandler("vstats", vstats_command))
     app.add_handler(CommandHandler("itemcheck", itemcheck_command))
+    app.add_handler(CommandHandler("article", article_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
