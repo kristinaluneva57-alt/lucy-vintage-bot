@@ -154,6 +154,7 @@ def ask_openai(
     max_tokens=MAX_ANSWER_TOKENS,
     temperature=0.3,
     check_enabled=True,
+    timeout=30.0,
 ):
     """Синхронный вызов OpenAI. Возвращает текст ответа или бросает AIUnavailable.
 
@@ -171,7 +172,7 @@ def ask_openai(
 
     started = time.monotonic()
     try:
-        client = openai.OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
+        client = openai.OpenAI(api_key=api_key, timeout=timeout, max_retries=1)
         response = client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
