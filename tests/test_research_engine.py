@@ -494,6 +494,32 @@ class ResearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("выведена", texts(await self.admin.say("/pilot remove 1"))[0])
         self.assertEqual(access.role_of(bot.DB_PATH, 1), "member")
 
+    # --- испытания ---
+
+    async def test_trial_summary_and_sheet(self):
+        async def reply_document(message, document, filename=None, **kwargs):
+            message.chat.sent.append(("document", (filename, document.getvalue().decode("utf-8")), None))
+
+        await self.run_research()
+        calls = len(FakeOpenAI.calls)
+        with mock.patch.object(FakeMessage, "reply_document", reply_document, create=True):
+            replies = await self.admin.say("/trial OMG-000006 OMG-000007")
+        self.assertEqual(len(FakeOpenAI.calls), calls)  # сводка ничего не запускает
+        text = "\n".join(texts(replies))
+        self.assertIn("💎 OMG-000006", text)
+        self.assertIn("• старая: не запускалась", text)
+        self.assertIn("• исследование: Брошь Sarah Coventry · уверенность высокая · книг 1, сайтов 3, "
+                      "аналогов 1, продаж 1 · удалено без источника 5, понижено 2", text)
+        self.assertIn("• глубокая: не запускалась (/research OMG-000006 deep)", text)
+        self.assertIn("• исследование: 0.1360 $ (по 1)", text)
+        files = [c for k, c, _ in replies if k == "document"]
+        name, sheet = files[0]
+        self.assertEqual(name, "trial_results.tsv")
+        header = sheet.splitlines()[0].split("\t")
+        self.assertIn("правильность 0-2", header)
+        self.assertEqual(len(sheet.splitlines()), 1 + 2 * 3)
+        self.assertIn("только администратору", texts(await self.user.say("/trial OMG-000007"))[0])
+
     async def test_foreign_card_cannot_be_researched(self):
         replies = await self.admin.say("/research OMG-000007")
         self.assertIn("только свою карточку", texts(replies)[0])

@@ -10,6 +10,7 @@ import library_ai
 import library_article
 import research_engine
 import access
+import trials
 import web_search
 import ai_ledger
 import library_catalog
@@ -4214,6 +4215,27 @@ async def pilot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def trial_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    codes = [a.strip().upper() for a in (context.args or []) if a.strip()][:10]
+    if not codes:
+        await update.message.reply_text(
+            "🧪 Сводка испытаний: /trial OMG-000006 OMG-000007 …\n"
+            "Ничего не запускает — собирает уже сделанные исследования. "
+            "Протокол: docs/RESEARCH_TRIALS.md"
+        )
+        return
+    rows = await asyncio.to_thread(trials.collect, DB_PATH, codes)
+    await send_long(update.message, trials.summary_lines(rows))
+    try:
+        await update.message.reply_document(
+            document=BytesIO(trials.score_sheet(rows).encode("utf-8")),
+            filename="trial_results.tsv",
+        )
+    except Exception as error:
+        print(f"Trial file failed: {type(error).__name__}: {error}")
+
+
+@admin_only
 async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = [a.strip() for a in (context.args or []) if a.strip()]
     if not args:
@@ -4260,6 +4282,7 @@ def text_commands():
         "article": article_command,
         "research": research_command,
         "pilot": pilot_command,
+        "trial": trial_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -4289,7 +4312,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research, /pilot"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -4347,6 +4370,7 @@ def main():
     app.add_handler(CommandHandler("article", article_command))
     app.add_handler(CommandHandler("research", research_command))
     app.add_handler(CommandHandler("pilot", pilot_command))
+    app.add_handler(CommandHandler("trial", trial_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
