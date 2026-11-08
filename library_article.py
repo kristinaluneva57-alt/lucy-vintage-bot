@@ -665,6 +665,13 @@ def _reserve(db_path, job_id, kind, estimate):
         conn.execute("BEGIN IMMEDIATE")
         try:
             _expire_stale(conn)
+            import ai_ledger
+
+            total = ai_ledger.month_total(db_path)
+            if total + estimate > ai_ledger.budget_month():
+                raise ArticleUnavailable(
+                    "budget", f"общий месячный бюджет ИИ {ai_ledger.budget_month():.2f} $"
+                )
             day = sum(_totals(conn, "day"))
             month = sum(_totals(conn, "month"))
             if day + estimate > budget_day():

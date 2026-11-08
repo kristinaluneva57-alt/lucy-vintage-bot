@@ -343,5 +343,6 @@ def ask(fragments, query):
         max_tokens=MAX_ANSWER_TOKENS,
         temperature=0.1,
         check_enabled=False,
+        kind="library",
     )
     return clean_answer(answer, fragments)
