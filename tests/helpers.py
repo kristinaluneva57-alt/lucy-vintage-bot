@@ -286,6 +286,8 @@ class FakeChat:
             await self.bot.research_callback(update, self.context)
         elif prefix == "art":
             await self.bot.article_callback(update, self.context)
+        elif prefix == "story":
+            await self.bot.story_callback(update, self.context)
         else:
             raise ValueError(data)
         return self.sent[start:]
