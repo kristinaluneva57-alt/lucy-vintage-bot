@@ -12,6 +12,8 @@
 """
 
 import os
+
+import ai_ledger
 import sqlite3
 import time
 from datetime import datetime
@@ -48,6 +50,12 @@ SYSTEM_PROMPT = """Ты — Люся, помощница OH MY GOD VINTAGE Schoo
 
 _RATE_LIMIT_CODES = {"insufficient_quota", "billing_hard_limit_reached"}
 
+
+
+def _ledger_db():
+    import library_db
+
+    return library_db.DB_PATH
 
 class AIUnavailable(Exception):
     """OpenAI не ответил. reason: 'disabled', 'no_key', 'quota', 'error'."""
@@ -155,6 +163,8 @@ def ask_openai(
     temperature=0.3,
     check_enabled=True,
     timeout=30.0,
+    kind="chat",
+    user_id=None,
 ):
     """Синхронный вызов OpenAI. Возвращает текст ответа или бросает AIUnavailable.
 
@@ -167,6 +177,15 @@ def ask_openai(
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise AIUnavailable("no_key")
+
+    db_path = _ledger_db()
+    try:
+        ai_ledger.check(db_path)
+    except ai_ledger.BudgetExceeded as error:
+        print(f"Lucy AI stopped: {error}")
+        raise AIUnavailable("budget") from None
+    except Exception as error:  # учёт не должен ломать ответ
+        print(f"Ledger check failed: {type(error).__name__}: {error}")
 
     import openai
 
@@ -189,6 +208,16 @@ def ask_openai(
 
     answer = (response.choices[0].message.content or "").strip()
     usage = getattr(response, "usage", None)
+    try:
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        ai_ledger.record(
+            db_path, provider="openai", kind=kind, model=AI_MODEL, user_id=user_id,
+            cost=ai_ledger.token_cost(AI_MODEL, input_tokens, output_tokens),
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        )
+    except Exception as error:
+        print(f"Ledger record failed: {type(error).__name__}: {error}")
     if usage is not None:
         print(
             f"Lucy AI ok: {time.monotonic() - started:.1f}s "

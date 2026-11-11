@@ -282,6 +282,8 @@ class FakeChat:
             await self.bot.books_callback(update, self.context)
         elif prefix == "lorig":
             await self.bot.library_original_callback(update, self.context)
+        elif prefix == "rs":
+            await self.bot.research_callback(update, self.context)
         elif prefix == "art":
             await self.bot.article_callback(update, self.context)
         else:

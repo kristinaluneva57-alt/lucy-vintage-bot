@@ -8,6 +8,11 @@ from io import BytesIO
 import library_search
 import library_ai
 import library_article
+import research_engine
+import access
+import trials
+import web_search
+import ai_ledger
 import library_catalog
 import attribution
 import page_images
@@ -16,7 +21,7 @@ import visual_ai
 import visual_index
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
-from big_book_upload import bigbook_command, start_upload_server
+from big_book_upload import bigbook_command, start_upload_server, notify_admin
 
 from library_db import init_library_db
 from knowledge_bridge import (
@@ -736,6 +741,7 @@ async def show_item_card(message, item_code, user_id):
 
     extra_photos = get_item_photos(item_code)
     extra_count = len(extra_photos)
+    latest_research = research_engine.latest_for_item(DB_PATH, item_code)
     has_mark_photo = bool(mark_photo) or any(kind == "mark" for kind, _ in extra_photos)
     notes_block = f"─── ОПИСАНИЕ ───\n{notes}\n\n" if notes else ""
     extra_line = (
@@ -754,7 +760,8 @@ async def show_item_card(message, item_code, user_id):
         f"{extra_line}\n"
         f"{notes_block}"
         "─── АТРИБУЦИЯ ───\n"
-        f"◇ Статус: {attribution_status or 'не определено'}\n\n"
+        f"◇ Статус: {attribution_status or 'не определено'}\n"
+        f"{research_card_line(latest_research)}\n"
         "─── ИСТОРИЯ ПРОДАВЦА ───\n"
         f"{seller_story or 'не указана'}"
     )
@@ -773,6 +780,9 @@ async def show_item_card(message, item_code, user_id):
             "🔬 Исследовать по библиотеке",
             callback_data=f"vpre:{item_code}"
         )],
+        *([[InlineKeyboardButton(
+            "📄 Исследование Люси", callback_data=f"rs:open:{latest_research['id']}"
+        )]] if latest_research else []),
         [InlineKeyboardButton(
             "✏️ Редактировать",
             callback_data=f"edit:{item_code}"
@@ -1281,10 +1291,35 @@ async def open_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Фото клейма и деталей пока нет. 📸")
 
 
+PILOT_REPLIES = {
+    "joined": (
+        "🎉 Добро пожаловать в пилот Люси!\n\n"
+        "Тебе открыто исследование украшений: добавь находку в «🗃️ Моя шкатулка», "
+        "открой карточку → «🔬 Исследовать по библиотеке» → «🔬 Исследование Люси». "
+        "Люся рассмотрит фото, прочитает книги нашей библиотеки и проверит каждый вывод "
+        "по источникам. Это исследование, а не экспертиза: Люся честно скажет, "
+        "что подтверждено, а что только предполагается."
+    ),
+    "already": "Ты уже в пилоте Люси. 🙂",
+    "full": "😔 Места в пилоте уже заняты. Я запомню — напиши Кристине, если хочешь в следующую группу.",
+    "bad_code": "Эта ссылка-приглашение не подходит. Спроси у Кристины актуальную.",
+    "closed": "Набор в пилот сейчас закрыт.",
+}
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start выводит из незаконченной анкеты.
     reset_anketa(context)
     context.user_data.pop("ai_history", None)
+
+    args = context.args or []
+    if args and args[0].lower().startswith("pilot-"):
+        result = await asyncio.to_thread(
+            access.join_pilot, DB_PATH, update.effective_user.id, args[0][len("pilot-"):]
+        )
+        await update.message.reply_text(PILOT_REPLIES[result])
+        if result == "joined":
+            print(f"Pilot joined: {update.effective_user.id}")
 
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
@@ -1934,6 +1969,11 @@ async def notify_admin_ai_problem(context, reason):
         )
     elif reason == "no_key":
         text = "⚠️ Люся: не задан OPENAI_API_KEY — свободные ответы не работают."
+    elif reason == "budget":
+        text = (
+            "⚠️ Люся: исчерпан общий месячный бюджет ИИ (LUCY_AI_BUDGET_MONTH_USD). "
+            "Платные ответы остановлены."
+        )
     else:
         text = "⚠️ Люся: OpenAI не отвечает. Подробности — в логах Railway."
     try:
@@ -2558,13 +2598,29 @@ async def research_preview(message, context, item_code, user_id):
     else:
         lines.append(f"Режим: бесплатный поиск по книгам без ИИ — {reason}.")
 
-    await message.reply_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔬 Начать исследование", callback_data=f"vattr:{item_code}")],
-            [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
-        ]),
-    )
+    rows = []
+    if research_allowed(user_id) and research_engine.enabled():
+        lines += [
+            "",
+            "Новое — исследование Люси: модель рассматривает фото, читает книги целиком"
+            + (" и ищет в интернете" if web_search.get_provider().connected else "")
+            + ", а каждый вывод проверяется по источникам. Сначала покажу план и цену.",
+        ]
+        rows += [
+            [InlineKeyboardButton(
+                f"🔬 Исследование Люси (≈ {research_engine.estimate('research'):.2f} $)",
+                callback_data=f"rs:new:{item_code}:research",
+            )],
+            [InlineKeyboardButton(
+                f"🧭 Глубокая атрибуция (≈ {research_engine.estimate('deep'):.2f} $)",
+                callback_data=f"rs:new:{item_code}:deep",
+            )],
+        ]
+    rows += [
+        [InlineKeyboardButton("🔬 Начать исследование", callback_data=f"vattr:{item_code}")],
+        [InlineKeyboardButton("➕ Добавить подробности", callback_data=f"qmore:{item_code}")],
+    ]
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def show_my_items(message, user_id):
@@ -3676,6 +3732,10 @@ async def vstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• {names.get(kind, kind)}: {count} шт · {value:.4f} $ · "
                 f"вход {input_tokens} / выход {output_tokens}"
             )
+    try:
+        lines = await asyncio.to_thread(ai_ledger.summary_lines, DB_PATH) + [""] + lines
+    except Exception as error:
+        print(f"Ledger summary failed: {type(error).__name__}: {error}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -3896,6 +3956,299 @@ async def article_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_article(query.message, context, job_id)
 
 
+# --- Lucy Research Engine: исследование украшения ---
+
+RESEARCH_PROBLEMS = {
+    "disabled": "исследования выключены (LUCY_RESEARCH_ENABLED)",
+    "no_key": "не настроен ИИ",
+    "budget": "исчерпан бюджет ИИ",
+    "quota": "в OpenAI закончился баланс",
+    "error": "ИИ не ответил",
+    "bad_json": "ИИ ответил в неверном формате",
+}
+
+
+def card_for_research(item_code, user_id):
+    """Поля и фото своей карточки для исследования. None — карточка не своя."""
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT front_photo, back_photo, mark_photo, details_photo, mark_text, notes,
+                   mark_status, measurements, weight, provenance, seller_story
+            FROM items
+            WHERE item_code = ? AND {access}
+            """,
+            (item_code, *params),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    front, back, mark, details = row[:4]
+    keys = ("mark_text", "notes", "mark_status", "measurements", "weight", "provenance", "seller_story")
+    card = dict(zip(keys, row[4:]))
+    photos = [(label, file_id) for label, file_id in (
+        ("front", front), ("back", back), ("mark", mark), ("details", details)
+    ) if file_id]
+    for kind, file_id in get_item_photos(item_code):
+        photos.append(("mark" if kind == "mark" else "extra", file_id))
+    return {"card": card, "photos": photos}
+
+
+async def offer_research(message, user_id, item_code, mode):
+    """План исследования с ценой и кнопками. Ничего платного не запускает."""
+    if not research_engine.enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
+        await message.reply_text("🔬 Исследования сейчас выключены или не настроен ИИ.")
+        return
+    data = await asyncio.to_thread(card_for_research, item_code, user_id)
+    if data is None:
+        await message.reply_text("Исследовать можно только свою карточку. 🔎")
+        return
+    if not data["photos"]:
+        await message.reply_text(
+            "В карточке нет фото. Добавь фото лицевой стороны и клейма: "
+            "✏️ Редактировать → 📸 Добавить фото."
+        )
+        return
+    if not research_allowed(user_id):
+        await message.reply_text("🔬 Исследование Люси пока доступно только в пилоте.")
+        return
+    state, record = await asyncio.to_thread(
+        research_engine.plan, DB_PATH, item_code, user_id, data["card"], mode,
+        [file_id for _, file_id in data["photos"]],
+    )
+    if state == "cached":
+        await message.reply_text("📂 Это исследование уже готово для тех же фото и данных — показываю бесплатно.")
+        await send_research(message, record["id"])
+        return
+    if state == "running":
+        await message.reply_text("🔬 Исследование уже идёт — дождись результата, пожалуйста.")
+        return
+    allowed, left, limit = await asyncio.to_thread(access.research_quota, DB_PATH, user_id, mode)
+    if not allowed:
+        await asyncio.to_thread(research_engine.cancel, DB_PATH, record["id"], user_id)
+        await message.reply_text(
+            f"🔬 Лимит на этот месяц исчерпан ({limit} из {limit}). "
+            "Готовые исследования в карточках открываются бесплатно."
+        )
+        return
+    lines = research_engine.plan_lines(record)
+    line = quota_line(user_id, mode)
+    if line:
+        lines.append(line)
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton("▶️ Запустить", callback_data=f"rs:go:{record['id']}"),
+        InlineKeyboardButton("✖️ Отмена", callback_data=f"rs:no:{record['id']}"),
+    ]]))
+
+
+async def send_research(message, research_id):
+    record = await asyncio.to_thread(research_engine.get, DB_PATH, research_id)
+    await send_long(message, research_engine.report_lines(record))
+    await message.reply_text(
+        "Записать предварительный вывод в статус карточки?",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💾 Записать вывод в карточку", callback_data=f"rs:save:{research_id}"),
+        ]]),
+    )
+
+
+def research_allowed(user_id):
+    """Исследования Люси: администратор и участницы пилота."""
+    return access.role_of(DB_PATH, user_id) in (access.ROLE_ADMIN, access.ROLE_PILOT)
+
+
+def quota_line(user_id, mode):
+    allowed, left, limit = access.research_quota(DB_PATH, user_id, mode)
+    if limit is None:
+        return None
+    return f"Осталось в этом месяце: {left} из {limit}. Спишется только после «Запустить»."
+
+
+def research_card_line(record):
+    if not record or not record.get("result"):
+        return ""
+    ident = record["result"]["identification"]
+    summary = ident.get("summary") or "вывода нет"
+    confidence = research_engine.CONFIDENCE_LABELS[ident["confidence"]]
+    return f"🔬 Исследование Люси: {summary[:160]} (уверенность: {confidence})\n"
+
+
+def save_research_status(research_id, user_id):
+    """Записывает вывод исследования в статус своей карточки. True — записано."""
+    record = research_engine.get(DB_PATH, research_id)
+    if record is None or record["status"] != "done" or record["user_id"] != user_id:
+        return False
+    ident = record["result"]["identification"]
+    status = (
+        f"{ident.get('summary') or 'не определено'} — предварительно, уверенность "
+        f"{research_engine.CONFIDENCE_LABELS[ident['confidence']]} (исследование Люси №{research_id})"
+    )[:300]
+    access, params = item_access(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            f"UPDATE items SET attribution_status = ? WHERE item_code = ? AND {access}",
+            (status, record["item_code"], *params),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+async def research_worker(message, context, research_id, user_id, photo_ids):
+    try:
+        photos = []
+        for label, file_id in photo_ids:
+            photos.append((label, await download_photo(context, file_id)))
+        await asyncio.to_thread(research_engine.run, DB_PATH, research_id, photos)
+    except research_engine.ResearchUnavailable as problem:
+        reason = RESEARCH_PROBLEMS.get(problem.reason, problem.reason)
+        details = f" ({problem.details})" if problem.details and is_admin(user_id) else ""
+        await message.reply_text(
+            f"⏸ Исследование не завершилось: {reason}{details}. Потраченное учтено; "
+            "можно попробовать ещё раз позже."
+        )
+        return
+    except Exception as error:
+        print(f"Research failed: {type(error).__name__}: {error}")
+        await asyncio.to_thread(research_engine._finish, DB_PATH, research_id, "error", None, type(error).__name__)
+        await message.reply_text("😔 Исследование не получилось довести до конца. Карточка не изменилась.")
+        return
+    await send_research(message, research_id)
+
+
+async def research_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    parts = query.data.split(":")
+    if len(parts) == 4 and parts[1] == "new":
+        if not research_allowed(user_id):
+            await query.message.reply_text("🔬 Исследование Люси пока доступно только в пилоте.")
+            return
+        mode = parts[3] if parts[3] in research_engine.MODES else "research"
+        await offer_research(query.message, user_id, parts[2], mode)
+        return
+    try:
+        _, action, research_id = parts
+        research_id = int(research_id)
+    except ValueError:
+        return
+    record = await asyncio.to_thread(research_engine.get, DB_PATH, research_id)
+    if record is None or record["user_id"] != user_id:
+        await query.message.reply_text("Это исследование не твоё. 🔎")
+        return
+    if action == "open":
+        if record["status"] == "done":
+            await send_research(query.message, research_id)
+        else:
+            await query.message.reply_text("Исследование ещё не готово.")
+        return
+    if action == "save":
+        saved = await asyncio.to_thread(save_research_status, research_id, user_id)
+        await query.message.reply_text(
+            "💾 Вывод записан в статус карточки — с пометкой «предварительно»."
+            if saved else "Не получилось записать: карточка недоступна или исследование не готово."
+        )
+        return
+    if action == "no":
+        await asyncio.to_thread(research_engine.cancel, DB_PATH, research_id, user_id)
+        await query.message.reply_text("✖️ Исследование отменено, деньги не потрачены.")
+        return
+    if action != "go":
+        return
+    if record["status"] == "done":
+        await send_research(query.message, research_id)
+        return
+    allowed, _, limit = await asyncio.to_thread(access.research_quota, DB_PATH, user_id, record["mode"])
+    if not research_allowed(user_id) or not allowed:
+        await query.message.reply_text(
+            "🔬 Запустить нельзя: исследование доступно в пилоте, "
+            f"и месячный лимит{f' ({limit})' if limit else ''} должен быть не исчерпан."
+        )
+        return
+    if not await asyncio.to_thread(research_engine.claim, DB_PATH, research_id, user_id):
+        await query.message.reply_text("🔬 Это исследование уже запущено или закрыто — повторно не запускаю.")
+        return
+    data = await asyncio.to_thread(card_for_research, record["item_code"], user_id)
+    if data is None:
+        await asyncio.to_thread(research_engine._finish, DB_PATH, research_id, "error", None, "no_card")
+        await query.message.reply_text("Карточка недоступна. 🔎")
+        return
+    await query.message.reply_text("▶️ Начала исследование. Пришлю результат сюда — Люся пока свободна.")
+    context.application.create_task(
+        research_worker(query.message, context, research_id, user_id, data["photos"][:6])
+    )
+
+
+@admin_only
+async def pilot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if len(args) == 2 and args[0].lower() == "remove" and args[1].isdigit():
+        removed = await asyncio.to_thread(access.remove, DB_PATH, int(args[1]))
+        await update.message.reply_text("Участница выведена из пилота." if removed else "Такой участницы в пилоте нет.")
+        return
+    await asyncio.to_thread(access.init_tables, DB_PATH)
+    members = await asyncio.to_thread(access.pilots, DB_PATH)
+    username = getattr(context.bot, "username", None) or "LucyVintageBot"
+    code = access.pilot_code()
+    lines = [f"🧪 ПИЛОТ ЛЮСИ: {len(members)} из {access.pilot_max()}"]
+    if code:
+        lines.append(f"Ссылка-приглашение: https://t.me/{username}?start=pilot-{code}")
+    else:
+        lines.append("Набор закрыт: задай LUCY_PILOT_CODE в Railway, чтобы появилась ссылка.")
+    lines.append(
+        f"Лимиты в месяц: исследование {access.monthly_limit(access.ROLE_PILOT, 'research')}, "
+        f"глубокая атрибуция {access.monthly_limit(access.ROLE_PILOT, 'deep')}."
+    )
+    for user_id in members:
+        research = await asyncio.to_thread(access.used_this_month, DB_PATH, user_id, "research")
+        deep = await asyncio.to_thread(access.used_this_month, DB_PATH, user_id, "deep")
+        lines.append(f"• {user_id}: исследований {research}, глубоких {deep}")
+    if members:
+        lines.append("Вывести из пилота: /pilot remove ID")
+    await update.message.reply_text("\n".join(lines))
+
+
+@admin_only
+async def trial_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    codes = [a.strip().upper() for a in (context.args or []) if a.strip()][:10]
+    if not codes:
+        await update.message.reply_text(
+            "🧪 Сводка испытаний: /trial OMG-000006 OMG-000007 …\n"
+            "Ничего не запускает — собирает уже сделанные исследования. "
+            "Протокол: docs/RESEARCH_TRIALS.md"
+        )
+        return
+    rows = await asyncio.to_thread(trials.collect, DB_PATH, codes)
+    await send_long(update.message, trials.summary_lines(rows))
+    try:
+        await update.message.reply_document(
+            document=BytesIO(trials.score_sheet(rows).encode("utf-8")),
+            filename="trial_results.tsv",
+        )
+    except Exception as error:
+        print(f"Trial file failed: {type(error).__name__}: {error}")
+
+
+@admin_only
+async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if not args:
+        await update.message.reply_text(
+            "🔬 Исследование карточки: /research OMG-000006\n"
+            "Глубокая атрибуция: /research OMG-000006 deep\n"
+            "Перед запуском покажу план и стоимость."
+        )
+        return
+    mode = "deep" if len(args) > 1 and args[1].lower() in ("deep", "глубокая", "глубоко") else "research"
+    await offer_research(update.message, update.effective_user.id, args[0].upper(), mode)
+
+
 @admin_only
 async def itemcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codes = [arg.strip().upper() for arg in (context.args or []) if arg.strip()][:20]
@@ -3927,6 +4280,9 @@ def text_commands():
         "vstats": vstats_command,
         "itemcheck": itemcheck_command,
         "article": article_command,
+        "research": research_command,
+        "pilot": pilot_command,
+        "trial": trial_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
     }
@@ -3956,7 +4312,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -3981,6 +4337,10 @@ def main():
     lucy_ai.init_ai_usage_table(DB_PATH)
     library_ai.init_tables(DB_PATH)
     library_article.init_tables(DB_PATH)
+    research_engine.init_tables(DB_PATH)
+    access.init_tables(DB_PATH)
+    ai_ledger.init_tables(DB_PATH)
+    ai_ledger.notifier = notify_admin
     attribution.init_tables(DB_PATH)
     seed_books()
     seed_knowledge()
@@ -4008,6 +4368,9 @@ def main():
     app.add_handler(CommandHandler("vstats", vstats_command))
     app.add_handler(CommandHandler("itemcheck", itemcheck_command))
     app.add_handler(CommandHandler("article", article_command))
+    app.add_handler(CommandHandler("research", research_command))
+    app.add_handler(CommandHandler("pilot", pilot_command))
+    app.add_handler(CommandHandler("trial", trial_command))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
@@ -4015,6 +4378,7 @@ def main():
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
     app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^art:"))
+    app.add_handler(CallbackQueryHandler(research_callback, pattern=r"^rs:"))
     app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vpre|vattr|vsrc|vsave):"))
     app.add_handler(CallbackQueryHandler(quick_callback, pattern=r"^(qskip|qmark|qmok|qmtype|qmskip|qmore):"))
     app.add_handler(

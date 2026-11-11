@@ -207,6 +207,13 @@ def reserve(db_path, *, kind, images, estimate, attribution_id=None, user_id=Non
         conn.execute("BEGIN IMMEDIATE")
         try:
             _expire_stale(conn)
+            import ai_ledger
+
+            total = ai_ledger.month_total(db_path)
+            if total + estimate > ai_ledger.budget_month():
+                raise BudgetExceeded(
+                    f"общий месячный бюджет ИИ {ai_ledger.budget_month():.2f} $ (потрачено {total:.2f} $)"
+                )
             day_charged, day_reserved = _totals(conn, "day")
             month_charged, month_reserved = _totals(conn, "month")
             if day_charged + day_reserved + estimate > budget_day():
