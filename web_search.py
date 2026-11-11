@@ -141,8 +141,13 @@ class TavilyProvider(Provider):
 
 
 def configured_provider():
-    """Tavily, если задан TAVILY_API_KEY и поиск не выключен (LUCY_WEB_SEARCH=off)."""
-    if os.environ.get("LUCY_WEB_SEARCH", "tavily").strip().lower() in ("off", "0", "none", "no"):
+    """Tavily — только если поиск ЯВНО включён (LUCY_WEB_SEARCH=tavily) и задан ключ.
+
+    Ноябрь 2026: интернет-поиск заморожен по решению Кристины (дорого для
+    пилота). Код остаётся; по умолчанию поиск выключен, даже если в Railway
+    лежит TAVILY_API_KEY. Включить: LUCY_WEB_SEARCH=tavily.
+    """
+    if os.environ.get("LUCY_WEB_SEARCH", "off").strip().lower() not in ("tavily", "on", "1", "yes"):
         return NullProvider()
     key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not key:

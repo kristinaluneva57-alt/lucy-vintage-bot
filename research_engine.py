@@ -191,7 +191,9 @@ def enabled():
 
 
 def research_model():
-    return os.environ.get("LUCY_RESEARCH_MODEL", "gpt-4.1").strip() or "gpt-4.1"
+    # По умолчанию дешёвая gpt-4.1-mini (≈ в 5 раз дешевле gpt-4.1).
+    # Сильную модель можно включить переменной LUCY_RESEARCH_MODEL.
+    return os.environ.get("LUCY_RESEARCH_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
 
 
 def search_price_per_credit():

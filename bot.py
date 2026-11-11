@@ -7,6 +7,7 @@ from io import BytesIO
 
 import library_search
 import library_ai
+import library_story
 import library_article
 import research_engine
 import access
@@ -1490,10 +1491,13 @@ SEARCH_PROMPT = (
     "📚 НАЙТИ ИНФОРМАЦИЮ\n\n"
     "Я ищу по текстам книг нашей библиотеки — на английском, "
     "итальянском, немецком, французском, чешском, польском и русском.\n\n"
-    "Пиши запрос по-русски, например:\n"
-    "• бакелит\n"
+    "📝 Напиши тему одним-двумя словами — и я соберу статью из наших книг "
+    "с картинками со страниц:\n"
+    "• гранат\n"
     "• чешское стекло\n"
-    "• клейма Trifari\n\n"
+    "• Trifari\n\n"
+    "❓ Или задай вопрос — отвечу коротко по книгам:\n"
+    "• как отличить бакелит?\n\n"
     "⚠️ Это бета:\n"
     "• книг пока немного, библиотека пополняется;\n"
     "• русские слова я перевожу по своему словарю ювелирных терминов — "
@@ -1564,7 +1568,7 @@ async def answer_with_library_ai(update, context, query, results):
         answer_id, answer, cached_fragments = cached
         reply, numbers = library_ai.format_reply(answer, cached_fragments)
         await update.message.reply_text(
-            reply, reply_markup=original_buttons(answer_id, numbers)
+            reply, reply_markup=with_story_button(original_buttons(answer_id, numbers))
         )
         return True, None
 
@@ -1617,7 +1621,7 @@ async def answer_with_library_ai(update, context, query, results):
 
     reply, numbers = library_ai.format_reply(answer, fragments)
     markup = original_buttons(answer_id, numbers) if answer_id else None
-    await update.message.reply_text(reply, reply_markup=markup)
+    await update.message.reply_text(reply, reply_markup=with_story_button(markup))
     return True, None
 
 
@@ -1644,6 +1648,229 @@ async def library_original_callback(update: Update, context: ContextTypes.DEFAUL
         "возможны опечатки OCR):\n\n"
         f"{fragment['text']}"[:3900]
     )
+
+
+QUESTION_WORDS = (
+    "как", "что", "почему", "зачем", "где", "когда", "чем", "кто", "сколько",
+    "какой", "какая", "какое", "какие", "каким", "можно", "ли", "отличить",
+    "отличается", "определить", "правда", "бывает", "есть ли",
+)
+STORY_BUTTON_TEXT = "📝 Статья по теме с картинками"
+
+
+def is_topic_request(query):
+    """«гранат», «чешское стекло», «Trifari» — тема для статьи.
+
+    Вопрос («как отличить бакелит?») — короткий ответ по книгам.
+    """
+    text = (query or "").strip().lower()
+    if not text or "?" in text:
+        return False
+    words = re.findall(r"[\w\-]+", text)
+    if not words or len(words) > 5:
+        return False
+    return not any(word in QUESTION_WORDS for word in words)
+
+
+def with_story_button(markup):
+    if not library_story.enabled():
+        return markup
+    rows = list(markup.inline_keyboard) if markup is not None else []
+    rows.append([InlineKeyboardButton(STORY_BUTTON_TEXT, callback_data="story:new")])
+    return InlineKeyboardMarkup(rows)
+
+
+def story_original_buttons(story_id, numbers):
+    buttons = [
+        InlineKeyboardButton(f"📄 Оригинал [{n}]", callback_data=f"story:orig:{story_id}:{n}")
+        for n in numbers[:10]
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def send_story_pictures(message, story):
+    sent = 0
+    for picture in story["pictures"]:
+        try:
+            data = await asyncio.to_thread(library_story.picture_bytes, picture)
+        except Exception as error:
+            print(f"Story picture failed: {type(error).__name__}: {error}")
+            continue
+        try:
+            await message.reply_photo(
+                photo=data, caption=library_story.picture_caption(picture, story["topic"])
+            )
+            sent += 1
+        except Exception as error:
+            print(f"Story picture send failed: {type(error).__name__}: {error}")
+    return sent
+
+
+async def deliver_story(message, story):
+    parts, numbers = library_story.format_story(story)
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        await message.reply_text(
+            part,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=story_original_buttons(story["id"], numbers) if last else None,
+        )
+    await send_story_pictures(message, story)
+
+
+async def send_story(message, context, user_id, topic, plan=None, results=None):
+    """Статья по теме из книг с картинками. Возвращает True, если отправлена.
+
+    Один дешёвый вызов ИИ; та же тема при той же библиотеке — из кэша.
+    """
+    if not library_story.enabled():
+        return False
+    try:
+        key = await asyncio.to_thread(library_story.story_key, DB_PATH, topic)
+        cached = await asyncio.to_thread(library_story.find_cached, DB_PATH, key)
+    except Exception as error:
+        print(f"Story cache failed: {type(error).__name__}: {error}")
+        return False
+    if cached:
+        await deliver_story(message, cached)
+        return True
+
+    if not os.environ.get("OPENAI_API_KEY", "").strip() or not library_ai.enabled():
+        return False
+
+    # Обычный поиск берёт 6 страниц — для статьи ищем шире (тоже бесплатно).
+    try:
+        plan, results = await asyncio.to_thread(library_story.find_pages, DB_PATH, topic)
+    except Exception as error:
+        print(f"Story search failed: {type(error).__name__}: {error}")
+        if results is None:
+            return False
+    fragments = library_story.select_fragments(results or [])
+    if not fragments:
+        return False
+
+    if not is_admin(user_id):
+        try:
+            total = library_ai.used_today_total(DB_PATH)
+            mine = library_ai.used_today(DB_PATH, user_id)
+        except Exception as error:
+            print(f"Story usage failed: {type(error).__name__}: {error}")
+            return False
+        if total >= library_ai.daily_total_limit() or mine >= library_ai.daily_limit():
+            await message.reply_text(
+                "На сегодня статьи и пересказы по книгам закончились "
+                f"(до {library_ai.daily_limit()} в день). Готовые статьи по темам, "
+                "которые уже кто-то спрашивал, открываются и сейчас — бесплатно. "
+                "Ниже — найденные фрагменты в оригинале."
+            )
+            return False
+
+    await message.reply_text(
+        f"📝 Собираю статью «{topic[:60]}» из книг библиотеки — это займёт до минуты…"
+    )
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    except Exception:
+        pass
+
+    try:
+        article = await asyncio.to_thread(library_story.write, topic, fragments, user_id)
+    except lucy_ai.AIUnavailable as problem:
+        if problem.reason not in ("disabled",):
+            await notify_admin_ai_problem(context, problem.reason)
+        await message.reply_text(
+            "😔 Собрать статью сейчас не получилось — показываю, что нашла в книгах."
+        )
+        return False
+    except Exception as error:
+        print(f"Story failed: {type(error).__name__}")
+        await message.reply_text(
+            "😔 Собрать статью сейчас не получилось — показываю, что нашла в книгах."
+        )
+        return False
+
+    if not library_story.has_info(article):
+        await message.reply_text(
+            f"🔎 В книгах нашей библиотеки по теме «{topic[:60]}» пока мало сведений "
+            "для статьи. Библиотека пополняется — попробуй позже или другую формулировку."
+        )
+        return True
+
+    terms = list(getattr(plan, "all_terms", []) or []) + [topic]
+    try:
+        pictures = await asyncio.to_thread(
+            library_story.pick_pictures, DB_PATH, results, fragments, terms
+        )
+    except Exception as error:
+        print(f"Story pictures failed: {type(error).__name__}: {error}")
+        pictures = []
+
+    story = {"topic": topic, "article": article, "fragments": fragments, "pictures": pictures}
+    try:
+        story["id"] = await asyncio.to_thread(
+            library_story.save_story, DB_PATH, key, topic, article, fragments, pictures, user_id
+        )
+        if not is_admin(user_id):
+            await asyncio.to_thread(library_ai.record_question, DB_PATH, user_id)
+    except Exception as error:
+        print(f"Story save failed: {type(error).__name__}: {error}")
+        story["id"] = 0
+    await deliver_story(message, story)
+    return True
+
+
+async def story_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if parts[1] == "new":
+        topic = context.user_data.get("story_topic")
+        if not topic:
+            await query.message.reply_text(
+                f"Напиши тему ещё раз: нажми «{BTN_SEARCH}» и введи её одним-двумя словами."
+            )
+            return
+        told = await send_story(query.message, context, update.effective_user.id, topic)
+        if not told:
+            await query.message.reply_text(
+                f"🔎 Для статьи «{topic[:60]}» в книгах пока мало сведений."
+            )
+        return
+    if parts[1] == "orig" and len(parts) == 4:
+        try:
+            fragment = library_story.get_fragment(DB_PATH, int(parts[2]), int(parts[3]))
+        except Exception as error:
+            print(f"Story original failed: {type(error).__name__}: {error}")
+            fragment = None
+        if fragment is None:
+            await query.message.reply_text("Не нашла этот фрагмент. 🔎")
+            return
+        await query.message.reply_text(
+            f"📄 ОРИГИНАЛ [{fragment['n']}]\n"
+            f"📚 {fragment['title']}\n"
+            f"📄 {library_story.page_label(fragment)}\n"
+            f"🌐 Язык: {library_search.language_name(fragment.get('language'))}\n\n"
+            "Точный текст страницы после распознавания (без перевода, "
+            "возможны опечатки OCR):\n\n"
+            f"{fragment['text']}"[:3900]
+        )
+
+
+async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = " ".join(context.args or []).strip()
+    if not topic:
+        await update.message.reply_text(
+            "📝 Напиши тему после команды, например: /story гранат"
+        )
+        return
+    context.user_data["story_topic"] = topic[:library_story.MAX_TOPIC_CHARS]
+    told = await send_story(update.message, context, update.effective_user.id, topic)
+    if not told:
+        await update.message.reply_text(
+            f"🔎 Для статьи «{topic[:60]}» в книгах пока мало сведений."
+        )
 
 
 async def run_search(update: Update, context, query: str):
@@ -1685,6 +1912,17 @@ async def run_search(update: Update, context, query: str):
         )
         return
 
+    if is_topic_request(query):
+        context.user_data["story_topic"] = query[:library_story.MAX_TOPIC_CHARS]
+        told = await send_story(update.message, context, update.effective_user.id, query, plan, results)
+        if told:
+            await update.message.reply_text(
+                f"Чтобы искать ещё, снова нажми «{BTN_SEARCH}»." + unknown_note,
+                reply_markup=main_keyboard(),
+            )
+            return
+
+    context.user_data["story_topic"] = query[:library_story.MAX_TOPIC_CHARS]
     answered, note = await answer_with_library_ai(update, context, query, results)
     if answered:
         await update.message.reply_text(
@@ -4336,6 +4574,7 @@ def main():
     init_knowledge_bridge()
     lucy_ai.init_ai_usage_table(DB_PATH)
     library_ai.init_tables(DB_PATH)
+    library_story.init_tables(DB_PATH)
     library_article.init_tables(DB_PATH)
     research_engine.init_tables(DB_PATH)
     access.init_tables(DB_PATH)
@@ -4371,6 +4610,8 @@ def main():
     app.add_handler(CommandHandler("research", research_command))
     app.add_handler(CommandHandler("pilot", pilot_command))
     app.add_handler(CommandHandler("trial", trial_command))
+    app.add_handler(CommandHandler("story", story_command))
+    app.add_handler(CallbackQueryHandler(story_callback, pattern=r"^story:"))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
