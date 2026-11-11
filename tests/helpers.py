@@ -247,12 +247,11 @@ class FakeChat:
         )
         return self.sent[start:]
 
-    async def photo(self, file_id, media_group_id=None):
+    async def photo(self, file_id, media_group_id=None, caption=None):
         start = len(self.sent)
-        await self.bot.handle_message(
-            self._update(message=FakeMessage(self, photo_id=file_id, media_group_id=media_group_id)),
-            self.context,
-        )
+        message = FakeMessage(self, photo_id=file_id, media_group_id=media_group_id)
+        message.caption = caption
+        await self.bot.handle_message(self._update(message=message), self.context)
         return self.sent[start:]
 
     async def press(self, data):
@@ -288,6 +287,8 @@ class FakeChat:
             await self.bot.article_callback(update, self.context)
         elif prefix == "story":
             await self.bot.story_callback(update, self.context)
+        elif prefix == "loose":
+            await self.bot.loose_callback(update, self.context)
         else:
             raise ValueError(data)
         return self.sent[start:]
