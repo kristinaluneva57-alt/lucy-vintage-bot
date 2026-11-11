@@ -706,6 +706,7 @@ async def open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     item_code = query.data.split(":", 1)[1]
+    context.user_data["last_item"] = item_code
     await show_item_card(query.message, item_code, update.effective_user.id)
 
 
@@ -1380,6 +1381,200 @@ TEXT_STEP_HINTS = {
 }
 
 
+# --- фото без анкеты и живые фразы ---
+
+LOOSE_PHOTO_SECONDS = 30 * 60
+MAX_LOOSE_PHOTOS = 10
+
+
+def loose_photos(context):
+    """Фото, присланные вне анкеты за последние 30 минут."""
+    data = context.user_data
+    if not data.get("loose_photos"):
+        return []
+    if time.time() - data.get("loose_at", 0) > LOOSE_PHOTO_SECONDS:
+        data.pop("loose_photos", None)
+        return []
+    return list(data["loose_photos"])
+
+
+def loose_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💾 Сохранить в шкатулку", callback_data="loose:save")],
+        [InlineKeyboardButton("🔎 Найти похожее в книгах", callback_data="loose:find")],
+        [InlineKeyboardButton("✖️ Не нужно", callback_data="loose:no")],
+    ])
+
+
+async def offer_loose_photo(update, context):
+    """Фото без анкеты: Люся не ругается, а предлагает, что с ним сделать.
+
+    Ничего платного не запускается: «Найти похожее» сначала показывает
+    план исследования с ценой и кнопкой подтверждения.
+    """
+    message = update.message
+    data = context.user_data
+    file_id = message.photo[-1].file_id
+    group = message.media_group_id
+    photos = loose_photos(context)
+    # Остальные фото того же альбома — к тому же украшению, без нового вопроса.
+    if group and group == data.get("loose_group") and photos:
+        if len(photos) < MAX_LOOSE_PHOTOS:
+            data["loose_photos"] = photos + [file_id]
+        return
+    data["loose_photos"] = [file_id]
+    data["loose_group"] = group
+    data["loose_at"] = time.time()
+    # Подпись к фото — как фраза: «Люся, найди похожее», «сохрани в шкатулку».
+    intent, _ = detect_intent(message.caption or "")
+    if intent in ("save", "find") and not group:
+        await loose_action(message, context, update.effective_user.id, intent)
+        return
+    await message.reply_text(
+        "📸 Вижу украшение! Что с ним сделаем?\n\n"
+        "💾 Сохранить в шкатулку — заведу карточку и попрошу оборот и клеймо.\n"
+        "🔎 Найти похожее в книгах — сохраню карточку и покажу план "
+        "исследования по нашей библиотеке. Запускается только по кнопке.\n\n"
+        "Можно и словами: «сохрани в шкатулку» или «найди похожее».",
+        reply_markup=loose_keyboard(),
+    )
+
+
+async def save_loose_item(message, context, user_id):
+    """Карточка из присланных фото: первое — лицо, остальные — доп. фото."""
+    photos = loose_photos(context)
+    if not photos:
+        return None
+    item_code = await asyncio.to_thread(create_quick_item, user_id, photos[0])
+    for file_id in photos[1:]:
+        await asyncio.to_thread(add_item_photo, item_code, user_id, "extra", file_id)
+    context.user_data.pop("loose_photos", None)
+    context.user_data["last_item"] = item_code
+    return item_code
+
+
+async def loose_action(message, context, user_id, action):
+    if action == "no":
+        context.user_data.pop("loose_photos", None)
+        await message.reply_text("Хорошо, ничего не сохраняю. 🙂", reply_markup=main_keyboard())
+        return
+    if not loose_photos(context):
+        await message.reply_text(
+            "Не вижу свежего фото — пришли его ещё раз, пожалуйста. 📸"
+        )
+        return
+    item_code = await save_loose_item(message, context, user_id)
+    if action == "save":
+        clear_edit_state(context)
+        context.user_data.update({
+            "mode": "quick", "quick_code": item_code, "quick_step": "back",
+            "quick_started": time.time(), "quick_group": None,
+        })
+        await ask_back_photo(message, item_code)
+        return
+    await message.reply_text(
+        f"🗂 Сохранила фото в карточку {item_code} в «Моей шкатулке» — "
+        "так находки по ней не потеряются."
+    )
+    await research_preview(message, context, item_code, user_id)
+
+
+async def loose_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    await loose_action(query.message, context, update.effective_user.id, action)
+
+
+def _plain(text):
+    return " ".join(re.sub(r"[^\w\s\-]", " ", text.lower().replace("ё", "е")).split())
+
+
+_SAVE_INTENT = re.compile(r"\b(сохрани|запиши|добавь|положи)\w*\b.*\bшкатулк")
+_FIND_INTENT = re.compile(
+    r"(найди|поищи|ищи|посмотри|глянь|проверь|определи)\w*\b.*"
+    r"(похож|аналог|в книгах|в библиотеке|брошь|брошк|колье|бусы|браслет|клипс|серьг|"
+    r"кольц|кулон|подвеск|украшени|находк|эт[оуи]\b|мо[юие]\b)"
+)
+_FOUND_INTENT = re.compile(r"что (ты )?(уже )?(нашла|узнала|выяснила)")
+_STORY_INTENT = re.compile(
+    r"^(?:люся\s+)?(?:напиши|сделай|собери|покажи|дай)?\s*"
+    r"(?:статью|статья|расскажи(?: мне)?|почитать)\s+(?:про|о|об|по)\s+(.{2,80})$"
+)
+
+
+def detect_intent(text):
+    """Бесплатное правило вместо ИИ: (intent, тема или None).
+
+    Ничего не запускает само — только выбирает, что предложить.
+    """
+    plain = _plain(text)
+    plain = re.sub(r"^(люся|люсь|люсечка)\s+", "", plain)
+    story = _STORY_INTENT.match(plain)
+    if story:
+        return "story", story.group(1).strip()
+    if _SAVE_INTENT.search(plain):
+        return "save", None
+    if _FOUND_INTENT.search(plain):
+        return "found", None
+    if _FIND_INTENT.search(plain):
+        return "find", None
+    return None, None
+
+
+async def route_intent(update, context, text):
+    intent, topic = detect_intent(text)
+    if intent is None:
+        return False
+    message = update.message
+    user_id = update.effective_user.id
+    reset_anketa(context)
+
+    if intent == "story":
+        context.user_data["story_topic"] = topic[:library_story.MAX_TOPIC_CHARS]
+        told = await send_story(message, context, user_id, topic)
+        if not told:
+            await message.reply_text(
+                f"🔎 Для статьи «{topic[:60]}» в книгах пока мало сведений. "
+                f"Можно поискать фрагменты: «{BTN_SEARCH}».",
+                reply_markup=main_keyboard(),
+            )
+        return True
+
+    photos = loose_photos(context)
+    if intent in ("save", "find") and photos:
+        await loose_action(message, context, user_id, intent)
+        return True
+
+    last_item = context.user_data.get("last_item")
+    if intent == "find" and last_item:
+        await message.reply_text(f"🔎 Ищу по карточке {last_item}.")
+        await research_preview(message, context, last_item, user_id)
+        return True
+    if intent == "found" and last_item:
+        await show_item_card(message, last_item, user_id)
+        return True
+
+    if intent == "save":
+        await message.reply_text(
+            "💾 С радостью! Пришли фото украшения — и я заведу карточку. 📸",
+            reply_markup=main_keyboard(),
+        )
+    elif intent == "find":
+        await message.reply_text(
+            "🔎 Пришли фото украшения — лицо, а лучше ещё оборот и клеймо. "
+            "Потом скажи «найди похожее» или нажми кнопку под фото. 📸",
+            reply_markup=main_keyboard(),
+        )
+    else:
+        await message.reply_text(
+            "🗂 Открой украшение в «Моей шкатулке» — и я покажу, что уже "
+            f"нашла о нём: {BOX_PATH_LIST}.",
+            reply_markup=main_keyboard(),
+        )
+    return True
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     step = context.user_data.get("step")
@@ -1406,12 +1601,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("mode") != "identify" or (
         step not in PHOTO_STEP_HINTS and step not in TEXT_STEP_HINTS
     ):
-        await message.reply_text(
-            "📸 Фото получила, но сейчас мы не заполняем карточку.\n\n"
-            "Чтобы сохранить украшение в шкатулку, нажми "
-            f"{BOX_PATH_ADD} — и я попрошу фото по шагам.",
-            reply_markup=main_keyboard(),
-        )
+        await offer_loose_photo(update, context)
         return
 
     # Альбом приходит отдельными сообщениями с общим media_group_id.
@@ -2165,6 +2355,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "search":
         reset_anketa(context)
         await run_search(update, context, text)
+        return
+
+    # Живые фразы: «сохрани в шкатулку», «найди похожее», «статья про гранат».
+    if await route_intent(update, context, text):
         return
 
     # Всё остальное — свободный вопрос. Люся не молчит.
@@ -4568,6 +4762,22 @@ async def command_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await route_text_command(update, context)
 
 
+def make_persistence():
+    """Диалог (шаг анкеты, последнее фото, открытая карточка) переживает деплой.
+
+    Хранится рядом с базой на Railway Volume. Только user_data —
+    ни сообщений, ни данных бота туда не пишется.
+    """
+    from telegram.ext import PersistenceInput, PicklePersistence
+
+    folder = os.path.dirname(DB_PATH) or "."
+    return PicklePersistence(
+        filepath=os.path.join(folder, "lucy_dialog_state.pickle"),
+        store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False),
+        update_interval=30,
+    )
+
+
 def main():
     init_db()
     init_library_db()
@@ -4583,7 +4793,7 @@ def main():
     attribution.init_tables(DB_PATH)
     seed_books()
     seed_knowledge()
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).persistence(make_persistence()).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testknowledge", test_knowledge))
@@ -4612,6 +4822,7 @@ def main():
     app.add_handler(CommandHandler("trial", trial_command))
     app.add_handler(CommandHandler("story", story_command))
     app.add_handler(CallbackQueryHandler(story_callback, pattern=r"^story:"))
+    app.add_handler(CallbackQueryHandler(loose_callback, pattern=r"^loose:"))
     app.add_handler(CallbackQueryHandler(box_callback, pattern=r"^box:"))
     app.add_handler(CallbackQueryHandler(open_item, pattern=r"^item:"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern=r"^del(ok|no)?:"))
