@@ -212,6 +212,39 @@ def get_import_progress(document_id):
 
         return row[0], row[1], row[2]
 
+
+def processing_jobs():
+    """Книги, чей OCR сейчас идёт или оборвался посередине (статус processing).
+
+    Свежая — первой. updated_ts — время последней обработанной страницы
+    (unix, UTC), чтобы понять, движется ли загрузка.
+    """
+    from datetime import datetime, timezone
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.document_code, d.title, j.last_completed_page, j.updated_at
+            FROM library_import_jobs j
+            JOIN library_documents d ON d.id = j.document_id
+            WHERE j.status = 'processing'
+            ORDER BY j.updated_at DESC
+            """
+        ).fetchall()
+
+    jobs = []
+    for code, title, page, updated in rows:
+        try:
+            ts = datetime.strptime(updated, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            ).timestamp()
+        except (TypeError, ValueError):
+            ts = None
+        jobs.append(
+            {"code": code, "title": title, "page": page or 0, "updated_ts": ts}
+        )
+    return jobs
+
         
 def inspect_pdf(file_path):
     document = fitz.open(file_path)

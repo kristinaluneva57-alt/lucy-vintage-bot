@@ -35,6 +35,77 @@ sessions = {}
 sessions_lock = threading.Lock()
 import_lock = threading.Lock()
 
+# Что сейчас держит import_lock — для /importstatus.
+# generation растёт при каждом запуске: если администратор сбросил зависшую
+# загрузку, старый поток при завершении не снимет замок новой загрузки.
+STUCK_MINUTES = 15
+job_state_lock = threading.Lock()
+current_job = {}
+_job_generation = 0
+
+
+def _begin_job(title, file_name, upload_id):
+    """Вызывается, когда import_lock уже взят. Возвращает номер загрузки."""
+    global _job_generation
+    with job_state_lock:
+        _job_generation += 1
+        current_job.clear()
+        current_job.update(
+            title=title,
+            file_name=file_name,
+            upload_id=upload_id,
+            started=time.time(),
+            generation=_job_generation,
+        )
+        return _job_generation
+
+
+def _finish_job(generation=None):
+    """Снимает import_lock, если загрузку не сбросили вручную."""
+    with job_state_lock:
+        if generation is not None and generation != _job_generation:
+            return False
+        current_job.clear()
+        if import_lock.locked():
+            import_lock.release()
+        return True
+
+
+def force_release():
+    """Ручной сброс зависшей загрузки администратором."""
+    global _job_generation
+    with job_state_lock:
+        was_locked = import_lock.locked()
+        _job_generation += 1  # старый поток уже не снимет чужой замок
+        current_job.clear()
+        if was_locked:
+            import_lock.release()
+        return was_locked
+
+
+def import_status(progress=None, now=None):
+    """Состояние загрузки больших книг.
+
+    progress — строка из library_import_jobs (см. processing_jobs), если есть.
+    idle_minutes — сколько минут не было движения (страница или старт).
+    """
+    now = time.time() if now is None else now
+    with job_state_lock:
+        job = dict(current_job)
+    locked = import_lock.locked()
+
+    last_move = job.get("started")
+    if progress and progress.get("updated_ts"):
+        last_move = max(last_move or 0, progress["updated_ts"])
+    idle = None if last_move is None else max(0, int((now - last_move) // 60))
+
+    return {
+        "locked": locked,
+        "job": job,
+        "idle_minutes": idle,
+        "stuck": locked and (idle is None or idle >= STUCK_MINUTES),
+    }
+
 
 def secret():
     return os.environ["TELEGRAM_BOT_TOKEN"].encode()
@@ -376,7 +447,7 @@ def book_report(result, title, language, file_name=None, upload_id=None):
     return text
 
 
-def process_book(key, title, language, file_name=None, upload_id=None):
+def process_book(key, title, language, file_name=None, upload_id=None, generation=None):
     try:
         result = import_pdf_with_ocr(
             storage_key=key,
@@ -392,7 +463,7 @@ def process_book(key, title, language, file_name=None, upload_id=None):
             "Подробности находятся в Railway Logs."
         )
     finally:
-        import_lock.release()
+        _finish_job(generation)
 
 
 @web_app.post("/complete")
@@ -419,10 +490,13 @@ def complete():
 
         if not import_lock.acquire(blocking=False):
             return jsonify(
-                error="Люся уже обрабатывает другую большую книгу"
+                error="Люся уже обрабатывает другую большую книгу — проверь /importstatus в Telegram"
             ), 409
 
         session["state"] = "processing"
+        generation = _begin_job(
+            session["title"], session.get("file_name"), upload_id
+        )
 
     try:
         info = r2_client().head_object(
@@ -445,6 +519,7 @@ def complete():
                 session["language"],
                 session.get("file_name"),
                 upload_id,
+                generation,
             ),
             daemon=True
         )
@@ -456,7 +531,7 @@ def complete():
     except Exception:
         with sessions_lock:
             session["state"] = "prepared"
-        import_lock.release()
+        _finish_job(generation)
         log.exception("Upload verification failed")
         return jsonify(error="Не удалось проверить PDF в R2"), 400
 

@@ -23,6 +23,7 @@ import visual_index
 from functools import wraps
 from book_upload import receive_book_pdf, _upload_lock
 from big_book_upload import bigbook_command, start_upload_server, notify_admin
+import big_book_upload
 
 from library_db import init_library_db
 from knowledge_bridge import (
@@ -35,7 +36,7 @@ from ai_fact_extractor import extract_ai_facts, save_ai_facts
 import lucy_ai
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
-from library_importer import OCR_LANGUAGES, reocr_document, list_documents, get_page_text
+from library_importer import OCR_LANGUAGES, reocr_document, list_documents, get_page_text, processing_jobs
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -3336,7 +3337,7 @@ async def import_jet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # пишут во временный файл /tmp/library_import.pdf.
     if _upload_lock.locked():
         await update.message.reply_text(
-            "⏳ Другая книга ещё обрабатывается. Попробуй позже."
+            "⏳ Другая книга ещё обрабатывается. Попробуй позже или проверь /importstatus."
         )
         return
 
@@ -4700,6 +4701,104 @@ CYRILLIC_LOOKALIKES = str.maketrans({
 })
 
 
+def _minutes_ago(minutes):
+    if minutes is None:
+        return "неизвестно"
+    if minutes < 1:
+        return "только что"
+    if minutes < 60:
+        return f"{minutes} мин назад"
+    return f"{minutes // 60} ч {minutes % 60} мин назад"
+
+
+def import_status_view(now=None):
+    """Текст и кнопки /importstatus: что держит очередь загрузки книг."""
+    try:
+        jobs = processing_jobs()
+    except Exception as error:
+        print(f"importstatus jobs failed: {type(error).__name__}: {error}")
+        jobs = []
+    state = big_book_upload.import_status(jobs[0] if jobs else None, now=now)
+    lines = ["📥 ЗАГРУЗКА КНИГ", ""]
+    buttons = []
+
+    if state["locked"]:
+        title = state["job"].get("title") or "книга без названия"
+        lines.append(f"⏳ Сейчас обрабатывается: «{title}»")
+        if jobs:
+            lines.append(f"Готово страниц OCR: {jobs[0]['page']} ({jobs[0]['code']})")
+            stale = jobs[1:]
+        else:
+            lines.append("Страницы ещё не пошли или OCR уже закончен — идёт подготовка/индекс.")
+            stale = []
+        lines.append(f"Последнее движение: {_minutes_ago(state['idle_minutes'])}")
+        lines.append("")
+        if state["stuck"]:
+            lines.append(
+                f"⚠️ Больше {big_book_upload.STUCK_MINUTES} мин без движения — похоже, зависла.\n"
+                "Нажми «Сбросить», потом залей книгу заново через /bigbook — "
+                "она продолжит с последней готовой страницы."
+            )
+            buttons.append([InlineKeyboardButton("🔓 Сбросить зависшую загрузку", callback_data="imp:reset")])
+        else:
+            lines.append("Работает — дождись отчёта в чате. Проверь снова через 10 минут.")
+    else:
+        lines.append("✅ Очередь свободна — можно грузить через /bigbook.")
+        stale = jobs
+
+    if stale:
+        lines.append("")
+        lines.append("⚠️ Недогружены (обработка оборвалась):")
+        for job in stale[:10]:
+            lines.append(f"• {job['code']} — {job['title']}, остановилась на стр. {job['page']}")
+        lines.append("Залей ту же книгу снова через /bigbook — продолжит с этой страницы.")
+
+    if _upload_lock.locked():
+        lines.append("")
+        lines.append("⏳ Ещё идёт загрузка книги, отправленной прямо в чат.")
+
+    buttons.append([InlineKeyboardButton("🔄 Обновить", callback_data="imp:refresh")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+@admin_only
+async def importstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, keyboard = await asyncio.to_thread(import_status_view)
+    await update.effective_message.reply_text(text, reply_markup=keyboard)
+
+
+async def import_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🔒 Только для администратора.")
+        return
+    action = query.data.split(":", 1)[1]
+    if action == "reset":
+        jobs = await asyncio.to_thread(processing_jobs)
+        state = big_book_upload.import_status(jobs[0] if jobs else None)
+        if not state["locked"]:
+            await query.message.reply_text("✅ Очередь уже свободна — можно грузить через /bigbook.")
+            return
+        if not state["stuck"]:
+            await query.message.reply_text(
+                "⏳ Загрузка ещё двигается — сбрасывать не буду, чтобы не сломать книгу."
+            )
+            return
+        big_book_upload.force_release()
+        print("importstatus: admin reset stuck big book import")
+        await query.message.reply_text(
+            "🔓 Сбросила. Очередь свободна — залей книгу заново через /bigbook, "
+            "она продолжит с последней готовой страницы."
+        )
+        return
+    text, keyboard = await asyncio.to_thread(import_status_view)
+    try:
+        await query.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await query.message.reply_text(text, reply_markup=keyboard)
+
+
 def text_commands():
     return {
         "start": start,
@@ -4717,6 +4816,7 @@ def text_commands():
         "trial": trial_command,
         "reocr": reocr_command,
         "bigbook": bigbook_command,
+        "importstatus": importstatus_command,
     }
 
 
@@ -4744,7 +4844,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /importstatus, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -4805,6 +4905,8 @@ def main():
     app.add_handler(CommandHandler("testr2", test_r2))
     app.add_handler(CommandHandler("importjet", import_jet))
     app.add_handler(CommandHandler("bigbook", bigbook_command))
+    app.add_handler(CommandHandler("importstatus", importstatus_command))
+    app.add_handler(CallbackQueryHandler(import_callback, pattern=r"^imp:"))
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CommandHandler("reocr", reocr_command))
     app.add_handler(CommandHandler("books", books_command))
