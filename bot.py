@@ -18,6 +18,7 @@ import library_catalog
 import attribution
 import page_images
 import book_thumbnails
+import lost_books
 import visual_ai
 import visual_index
 from functools import wraps
@@ -36,6 +37,7 @@ from ai_fact_extractor import extract_ai_facts, save_ai_facts
 import lucy_ai
 from library_importer import register_document, save_page, update_import_progress, get_import_progress, download_pdf_from_r2, inspect_pdf, import_pdf_with_ocr
 
+from library_importer import diagnostic_lines, metadata_lines
 from library_importer import OCR_LANGUAGES, reocr_document, list_documents, get_page_text, processing_jobs
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -4799,6 +4801,188 @@ async def import_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text, reply_markup=keyboard)
 
 
+# --- /covers: обложки загруженных книг · /lost: PDF в R2 без записи в каталоге ---
+
+COVERS_PER_PAGE = 10
+LOST_LANGUAGES = ["eng", "deu", "ita", "fra", "rus"]
+
+
+@admin_only
+async def covers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [arg.strip() for arg in (context.args or []) if arg.strip()]
+    page = int(args[0]) - 1 if args and args[0].isdigit() else 0
+    await send_covers_page(update.effective_message, page)
+
+
+async def send_covers_page(message, page):
+    """Обложки (стр. 1 PDF) книг каталога — по 10 штук, с кодом и названием."""
+    total = await asyncio.to_thread(library_catalog.count_books)
+    if total == 0:
+        await message.reply_text("📚 В библиотеке пока нет книг. Проверь потерявшиеся: /lost")
+        return
+    pages = (total + COVERS_PER_PAGE - 1) // COVERS_PER_PAGE
+    page = min(max(0, page), pages - 1)
+    documents = await asyncio.to_thread(library_catalog.books_page, page, COVERS_PER_PAGE)
+    await message.reply_text(
+        f"🖼 ОБЛОЖКИ КНИГ · стр. {page + 1} из {pages} (всего книг: {total})\n"
+        "Первый раз обложка рисуется из PDF — может занять минутку, дальше из кеша."
+    )
+    for document in documents:
+        caption = f"{document['code']} · {book_title(document)}"
+        if document["meta_author"]:
+            caption += f"\nАвтор: {document['meta_author']}"
+        icon, status = book_status(document)
+        caption += f"\nСтраниц (OCR): {document['pages']} · {icon} {status}\nФайл: {document['file_title']}"
+        try:
+            image, _, _ = await asyncio.to_thread(
+                book_thumbnails.get_preview, document["code"], document["storage_key"], 1
+            )
+        except Exception as error:
+            print(f"covers: preview failed for {document['code']}: {type(error).__name__}")
+            image = None
+        if image:
+            await message.reply_photo(photo=image, caption=caption[:1000])
+        else:
+            await message.reply_text("⚠️ Обложка недоступна\n" + caption)
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton("◀ Предыдущие", callback_data=f"cv:{page - 1}"))
+    if page < pages - 1:
+        navigation.append(InlineKeyboardButton("Следующие ▶", callback_data=f"cv:{page + 1}"))
+    footer = f"Показаны книги {page * COVERS_PER_PAGE + 1}–{page * COVERS_PER_PAGE + len(documents)} из {total}."
+    footer += "\nНе нашла какую-то книгу? Проверь потерявшиеся: /lost"
+    await message.reply_text(footer, reply_markup=InlineKeyboardMarkup([navigation]) if navigation else None)
+
+
+async def covers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🔒 Только для администратора.")
+        return
+    await send_covers_page(query.message, int(query.data.split(":", 1)[1]))
+
+
+def lost_summary_text(result, known_count):
+    lost = result["lost"]
+    lines = [
+        "🔎 ПРОВЕРКА: ВСЕ ЛИ ЗАГРУЖЕННЫЕ PDF ПОПАЛИ В БИБЛИОТЕКУ",
+        "",
+        f"PDF в хранилище R2: {result['r2_total']}",
+        f"Записей в каталоге: {known_count}",
+    ]
+    if not lost:
+        lines += ["", "✅ Потерявшихся нет — каждый PDF из хранилища есть в каталоге."]
+    else:
+        lines += [
+            f"❗ В хранилище, но НЕ в библиотеке: {len(lost)}",
+            "",
+            "Файлы целы — они лежат в R2. Ниже обложки. Под каждой выбери язык книги — "
+            "поставлю её в очередь на распознавание и пришлю отчёт.",
+            "Если это дубль уже загруженной книги, отчёт так и скажет — второй копии не будет.",
+        ]
+    return "\n".join(lines)
+
+
+@admin_only
+async def lost_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_lost_page(update.effective_message, 0)
+
+
+async def send_lost_page(message, page):
+    try:
+        result = await asyncio.to_thread(lost_books.find_lost)
+        known = await asyncio.to_thread(lost_books.known_storage_keys)
+    except Exception as error:
+        print(f"lost: R2 listing failed: {type(error).__name__}: {error}")
+        await message.reply_text("❌ Не получилось прочитать хранилище R2. Подробности — в журнале Railway.")
+        return
+    lost = result["lost"]
+    if page == 0:
+        await message.reply_text(lost_summary_text(result, len(known)))
+    if not lost:
+        return
+    per_page = lost_books.PER_PAGE
+    pages = (len(lost) + per_page - 1) // per_page
+    page = min(max(0, page), pages - 1)
+    for item in lost[page * per_page:(page + 1) * per_page]:
+        caption = f"📕 Потерявшаяся книга\n{lost_books.describe(item)}"
+        try:
+            image, pdf_pages, lines = await asyncio.to_thread(lost_books.cover, item["key"])
+        except Exception as error:
+            print(f"lost: cover failed for {item['key']}: {type(error).__name__}")
+            image, pdf_pages, lines = None, None, []
+        if pdf_pages:
+            caption += f"\nСтраниц в PDF: {pdf_pages}"
+        if lines:
+            caption += "\nТекст стр. 1: " + " / ".join(line[:60] for line in lines)
+        buttons = [InlineKeyboardButton(
+            f"📥 {OCR_LANGUAGES.get(code, code)}", callback_data=f"lost:i:{item['id']}:{code}"
+        ) for code in LOST_LANGUAGES]
+        keyboard = InlineKeyboardMarkup([buttons[:3], buttons[3:]])
+        if image:
+            await message.reply_photo(photo=image, caption=caption[:1000], reply_markup=keyboard)
+        else:
+            await message.reply_text(caption + "\n⚠️ Обложку нарисовать не вышло.", reply_markup=keyboard)
+    if page < pages - 1:
+        await message.reply_text(
+            f"Показаны {page * per_page + 1}–{min((page + 1) * per_page, len(lost))} из {len(lost)}.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "Следующие ▶", callback_data=f"lost:p:{page + 1}")]]),
+        )
+
+
+async def lost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🔒 Только для администратора.")
+        return
+    parts = query.data.split(":")
+    if parts[1] == "p":
+        await send_lost_page(query.message, int(parts[2]))
+        return
+    lost_id, language = parts[2], parts[3]
+    item = await asyncio.to_thread(lost_books.lost_by_id, lost_id)
+    if item is None:
+        await query.message.reply_text("✅ Этой книги уже нет среди потерявшихся — она в каталоге. Проверь /books")
+        return
+    stamp = item["uploaded"].strftime("%d.%m.%Y") if hasattr(item.get("uploaded"), "strftime") else ""
+    title = f"Восстановленная книга {stamp}".strip()
+    await query.message.reply_text(
+        f"📥 Поставила в очередь ({OCR_LANGUAGES.get(language, language)}). "
+        "Книги распознаются по одной — пришлю отчёт, когда дойдёт очередь. "
+        "Название определю по титульному листу; поправить можно через /settitle."
+    )
+    context.application.create_task(_import_lost(query.message, item["key"], title, language))
+
+
+async def _import_lost(message, storage_key, title, language):
+    try:
+        result = await asyncio.to_thread(import_pdf_with_ocr, storage_key, title, language)
+        heading = "✅ КНИГА В БИБЛИОТЕКЕ (восстановлена)"
+        if not result.get("created", True):
+            heading = (
+                f"📚 Это дубль уже загруженной {result['document_code']} — "
+                "вторая копия не создана."
+            )
+        await message.reply_text(
+            f"{heading}\n\n"
+            f"Документ: {result['document_code']}\n"
+            + metadata_lines(result)
+            + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
+            f"PDF-страниц: {result['total_pages']}\n"
+            f"Обработано: {result['completed_pages']}\n"
+            f"Статус: {result['status']}"
+        )
+    except Exception as error:
+        print(f"lost import failed for {storage_key}: {type(error).__name__}: {error}")
+        await message.reply_text(
+            "❌ Не удалось распознать восстановленную книгу. PDF по-прежнему в R2 — "
+            "попробуй ещё раз через /lost. Подробности — в журнале Railway."
+        )
+
+
 def text_commands():
     return {
         "start": start,
@@ -4817,6 +5001,8 @@ def text_commands():
         "reocr": reocr_command,
         "bigbook": bigbook_command,
         "importstatus": importstatus_command,
+        "covers": covers_command,
+        "lost": lost_command,
     }
 
 
@@ -4844,7 +5030,7 @@ async def route_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"Unknown command: /{name[:30]}")
         known = "/start"
         if is_admin(update.effective_user.id):
-            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /importstatus, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
+            known += ", /books, /bookcheck, /fixmeta, /settitle, /dupes, /reocr, /bigbook, /importstatus, /covers, /lost, /vindex, /vstats, /itemcheck, /article, /research, /pilot, /trial"
         await update.message.reply_text(
             f"🤔 Не знаю команду /{name[:30]}.\nДоступно: {known}",
             reply_markup=main_keyboard(),
@@ -4910,6 +5096,8 @@ def main():
     app.add_handler(CommandHandler("testenv", test_env))
     app.add_handler(CommandHandler("reocr", reocr_command))
     app.add_handler(CommandHandler("books", books_command))
+    app.add_handler(CommandHandler("covers", covers_command))
+    app.add_handler(CommandHandler("lost", lost_command))
     app.add_handler(CommandHandler("bookcheck", bookcheck_command))
     app.add_handler(CallbackQueryHandler(books_callback, pattern=r"^bk:"))
     app.add_handler(CommandHandler("fixmeta", fixmeta_command))
@@ -4933,6 +5121,8 @@ def main():
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
     app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^art:"))
     app.add_handler(CallbackQueryHandler(research_callback, pattern=r"^rs:"))
+    app.add_handler(CallbackQueryHandler(covers_callback, pattern=r"^cv:"))
+    app.add_handler(CallbackQueryHandler(lost_callback, pattern=r"^lost:"))
     app.add_handler(CallbackQueryHandler(attribution_callback, pattern=r"^(vpre|vattr|vsrc|vsave):"))
     app.add_handler(CallbackQueryHandler(quick_callback, pattern=r"^(qskip|qmark|qmok|qmtype|qmskip|qmore):"))
     app.add_handler(
