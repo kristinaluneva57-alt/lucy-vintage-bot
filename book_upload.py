@@ -141,7 +141,7 @@ async def receive_book_pdf(
     if _upload_lock.locked():
         await message.reply_text(
             "⏳ Другая книга ещё обрабатывается. "
-            "Попробуй позже."
+            "Попробуй позже или проверь /importstatus."
         )
         return
 
