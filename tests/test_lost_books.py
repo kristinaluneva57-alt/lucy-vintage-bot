@@ -72,5 +72,42 @@ class LostBooksTest(unittest.TestCase):
         self.assertIs(commands["covers"], bot.covers_command)
 
 
+class _FakeR2:
+    def __init__(self):
+        self.deleted = []
+
+    def delete_object(self, Bucket, Key):
+        self.deleted.append(Key)
+
+
+class DeleteLostTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = _FakeR2()
+        self._orig = lost_books._r2
+        lost_books._r2 = lambda: self.fake
+        os.environ.setdefault("R2_BUCKET_NAME", "test-bucket")
+        self.addCleanup(setattr, lost_books, "_r2", self._orig)
+
+    def test_deletes_lost_pdf_and_cached_cover(self):
+        key = "books/browser/back-cover.pdf"
+        self.assertTrue(lost_books.delete_lost(key, known=set()))
+        self.assertEqual(self.fake.deleted[0], key)
+        self.assertIn(f"thumbnails/lost/{lost_books.short_id(key)}.jpg", self.fake.deleted)
+
+    def test_refuses_book_from_catalog(self):
+        key = "books/browser/real-book.pdf"
+        self.assertFalse(lost_books.delete_lost(key, known={key}))
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_refuses_keys_outside_books(self):
+        self.assertFalse(lost_books.delete_lost("thumbnails/x.jpg", known=set()))
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_delete_buttons_fit_telegram(self):
+        key = "books/browser/" + "f" * 32 + ".pdf"
+        for step in ("d", "x"):
+            self.assertLessEqual(len(f"lost:{step}:{lost_books.short_id(key)}".encode()), 64)
+
+
 if __name__ == "__main__":
     unittest.main()

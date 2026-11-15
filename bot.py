@@ -4919,7 +4919,10 @@ async def send_lost_page(message, page):
         buttons = [InlineKeyboardButton(
             f"📥 {OCR_LANGUAGES.get(code, code)}", callback_data=f"lost:i:{item['id']}:{code}"
         ) for code in LOST_LANGUAGES]
-        keyboard = InlineKeyboardMarkup([buttons[:3], buttons[3:]])
+        delete_button = InlineKeyboardButton(
+            "🗑 Удалить этот файл", callback_data=f"lost:d:{item['id']}"
+        )
+        keyboard = InlineKeyboardMarkup([buttons[:3], buttons[3:], [delete_button]])
         if image:
             await message.reply_photo(photo=image, caption=caption[:1000], reply_markup=keyboard)
         else:
@@ -4942,6 +4945,12 @@ async def lost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parts[1] == "p":
         await send_lost_page(query.message, int(parts[2]))
         return
+    if parts[1] == "n":
+        await query.message.reply_text("👌 Ничего не удаляю.")
+        return
+    if parts[1] in ("d", "x"):
+        await _lost_delete(query.message, parts[1], parts[2])
+        return
     lost_id, language = parts[2], parts[3]
     item = await asyncio.to_thread(lost_books.lost_by_id, lost_id)
     if item is None:
@@ -4955,6 +4964,36 @@ async def lost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Название определю по титульному листу; поправить можно через /settitle."
     )
     context.application.create_task(_import_lost(query.message, item["key"], title, language))
+
+
+async def _lost_delete(message, step, lost_id):
+    """d — спросить подтверждение, x — удалить. Удаляет только файлы не из каталога."""
+    item = await asyncio.to_thread(lost_books.lost_by_id, lost_id)
+    if item is None:
+        await message.reply_text("Этого файла уже нет среди потерявшихся. Проверь /lost")
+        return
+    if step == "d":
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 Да, удалить навсегда", callback_data=f"lost:x:{lost_id}"),
+            InlineKeyboardButton("Отмена", callback_data="lost:n"),
+        ]])
+        await message.reply_text(
+            "Точно удалить этот файл из хранилища?\n"
+            f"{lost_books.describe(item)}\n"
+            "Вернуть его будет нельзя. Книги из каталога это не трогает.",
+            reply_markup=keyboard,
+        )
+        return
+    try:
+        deleted = await asyncio.to_thread(lost_books.delete_lost, item["key"])
+    except Exception as error:
+        print(f"lost delete failed for {item['key']}: {type(error).__name__}: {error}")
+        await message.reply_text("❌ Не получилось удалить. Подробности — в журнале Railway.")
+        return
+    if deleted:
+        await message.reply_text("✅ Удалила. Этого файла больше нет. Проверить: /lost")
+    else:
+        await message.reply_text("⚠️ Не удалила: этот файл есть в каталоге.")
 
 
 async def _import_lost(message, storage_key, title, language):
