@@ -19,6 +19,7 @@ import attribution
 import page_images
 import book_thumbnails
 import lost_books
+import import_queue
 import visual_ai
 import visual_index
 from functools import wraps
@@ -4748,6 +4749,20 @@ def import_status_view(now=None):
         lines.append("✅ Очередь свободна — можно грузить через /bigbook.")
         stale = jobs
 
+    try:
+        waiting = [item for item in import_queue.pending() if item["state"] == import_queue.QUEUED]
+    except Exception as error:
+        print(f"importstatus queue failed: {type(error).__name__}: {error}")
+        waiting = []
+    if waiting:
+        lines.append("")
+        lines.append(f"📚 Ждут в очереди: {len(waiting)}")
+        for number, item in enumerate(waiting[:15], 1):
+            lines.append(f"{number}. {item['title']}")
+        if len(waiting) > 15:
+            lines.append(f"…и ещё {len(waiting) - 15}")
+        stale = [job for job in stale if not any(job["title"] == item["title"] for item in waiting)]
+
     if stale:
         lines.append("")
         lines.append("⚠️ Недогружены (обработка оборвалась):")
@@ -4958,12 +4973,14 @@ async def lost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     stamp = item["uploaded"].strftime("%d.%m.%Y") if hasattr(item.get("uploaded"), "strftime") else ""
     title = f"Восстановленная книга {stamp}".strip()
+    ahead = await asyncio.to_thread(big_book_upload.enqueue_book, item["key"], title, language)
+    line = f"Перед ней книг: {ahead}. " if ahead else "Начинаю читать прямо сейчас. "
     await query.message.reply_text(
-        f"📥 Поставила в очередь ({OCR_LANGUAGES.get(language, language)}). "
-        "Книги распознаются по одной — пришлю отчёт, когда дойдёт очередь. "
-        "Название определю по титульному листу; поправить можно через /settitle."
+        f"📥 Поставила в очередь ({OCR_LANGUAGES.get(language, language)}). {line}"
+        "Читаю строго по одной и ничего не теряю, даже если бота перезапустят. "
+        "Отчёт пришлю, когда дочитаю. Название определю по титульному листу; "
+        "поправить можно через /settitle. Что в очереди — /importstatus"
     )
-    context.application.create_task(_import_lost(query.message, item["key"], title, language))
 
 
 async def _lost_delete(message, step, lost_id):
@@ -4994,32 +5011,6 @@ async def _lost_delete(message, step, lost_id):
         await message.reply_text("✅ Удалила. Этого файла больше нет. Проверить: /lost")
     else:
         await message.reply_text("⚠️ Не удалила: этот файл есть в каталоге.")
-
-
-async def _import_lost(message, storage_key, title, language):
-    try:
-        result = await asyncio.to_thread(import_pdf_with_ocr, storage_key, title, language)
-        heading = "✅ КНИГА В БИБЛИОТЕКЕ (восстановлена)"
-        if not result.get("created", True):
-            heading = (
-                f"📚 Это дубль уже загруженной {result['document_code']} — "
-                "вторая копия не создана."
-            )
-        await message.reply_text(
-            f"{heading}\n\n"
-            f"Документ: {result['document_code']}\n"
-            + metadata_lines(result)
-            + f"Язык OCR: {OCR_LANGUAGES.get(language, language)}\n"
-            f"PDF-страниц: {result['total_pages']}\n"
-            f"Обработано: {result['completed_pages']}\n"
-            f"Статус: {result['status']}"
-        )
-    except Exception as error:
-        print(f"lost import failed for {storage_key}: {type(error).__name__}: {error}")
-        await message.reply_text(
-            "❌ Не удалось распознать восстановленную книгу. PDF по-прежнему в R2 — "
-            "попробуй ещё раз через /lost. Подробности — в журнале Railway."
-        )
 
 
 def text_commands():
@@ -5195,6 +5186,7 @@ def main():
     )
     
     start_upload_server()
+    big_book_upload.resume_queue_on_startup()
     app.run_polling()
 
 
