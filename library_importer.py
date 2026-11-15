@@ -543,6 +543,9 @@ def import_pdf_with_ocr(
             if not already_done:
                 _detect_metadata_safely(document_id)
                 _visual_index_safely(document_id, local_path)
+            # Обложка — сразу, пока PDF уже скачан: /covers потом берёт её из кеша
+            # мгновенно и не качает всю книгу заново.
+            _cover_safely(document_code, storage_key, local_path)
 
             # В сообщение — то, что реально сохранено в каталоге (в том числе
             # название, исправленное вручную через /settitle).
@@ -635,6 +638,16 @@ def metadata_lines(result):
             f"Задать вручную: /settitle {result['document_code']} Название | Автор\n"
         )
     return lines
+
+
+def _cover_safely(document_code, storage_key, pdf_path):
+    try:
+        import book_thumbnails
+
+        if not book_thumbnails.load_info(document_code, storage_key):
+            book_thumbnails.build_preview(document_code, storage_key, local_path=pdf_path)
+    except Exception as error:
+        print(f"cover prebuild skipped for {document_code}: {type(error).__name__}")
 
 
 def _visual_index_safely(document_id, pdf_path):
