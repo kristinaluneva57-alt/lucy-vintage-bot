@@ -80,6 +80,36 @@ class CoverPrebuildTest(unittest.TestCase):
         self.assertTrue(any("Обложка ещё рисуется" in t and "Huge" in t for t in message.texts))
         self.assertTrue(any("Small" in c for c in message.photos))
 
+    def test_covers_continue_when_telegram_rejects_one_photo(self):
+        documents = [
+            {"code": f"DOC-00000{i}", "storage_key": f"books/{i}.pdf", "meta_title": f"Book {i}",
+             "meta_author": "", "meta_source": "", "pages": 1, "status": "completed",
+             "last_page": 1, "file_title": f"b{i}"}
+            for i in (1, 2, 3)
+        ]
+
+        class Message:
+            def __init__(self):
+                self.texts, self.photos = [], []
+
+            async def reply_text(self, text, reply_markup=None):
+                self.texts.append(text)
+
+            async def reply_photo(self, photo, caption=None, reply_markup=None):
+                if "Book 2" in caption:
+                    raise RuntimeError("Bad Request: PHOTO_INVALID_DIMENSIONS")
+                self.photos.append(caption)
+
+        message = Message()
+        with mock.patch.object(bot.library_catalog, "count_books", lambda: 3), \
+                mock.patch.object(bot.library_catalog, "books_page", lambda p, n: documents), \
+                mock.patch.object(bot.book_thumbnails, "get_preview",
+                                  lambda c, k, p: (b"jpeg", {}, "cache")):
+            asyncio.run(bot.send_covers_page(message, 0))
+        self.assertEqual(len(message.photos), 2)
+        self.assertTrue(any("не получилось отправить" in t and "Book 2" in t for t in message.texts))
+        self.assertTrue(any("Book 3" in c for c in message.photos))
+
 
 if __name__ == "__main__":
     unittest.main()

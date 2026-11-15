@@ -4866,8 +4866,10 @@ async def send_covers_page(message, page):
         except Exception as error:
             print(f"covers: preview failed for {document['code']}: {type(error).__name__}")
             image = None
-        if image:
-            await message.reply_photo(photo=image, caption=caption[:1000])
+        if image and await _send_cover(message, image, caption):
+            pass
+        elif image:
+            await message.reply_text("⚠️ Обложку не получилось отправить\n" + caption)
         elif slow:
             await message.reply_text(
                 "⏳ Обложка ещё рисуется (книга большая) — будет готова в следующий раз\n" + caption
@@ -4882,6 +4884,17 @@ async def send_covers_page(message, page):
     footer = f"Показаны книги {page * COVERS_PER_PAGE + 1}–{page * COVERS_PER_PAGE + len(documents)} из {total}."
     footer += "\nНе нашла какую-то книгу? Проверь потерявшиеся: /lost"
     await message.reply_text(footer, reply_markup=InlineKeyboardMarkup([navigation]) if navigation else None)
+
+
+async def _send_cover(message, image, caption, keyboard=None):
+    """Отправляет обложку. Если Telegram её не принял — не роняет весь список,
+    а возвращает False (дальше идёт текстовая карточка и следующие книги)."""
+    try:
+        await message.reply_photo(photo=image, caption=caption[:1000], reply_markup=keyboard)
+        return True
+    except Exception as error:
+        print(f"cover send failed: {type(error).__name__}: {error}")
+        return False
 
 
 async def covers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4953,8 +4966,12 @@ async def send_lost_page(message, page):
             "🗑 Удалить этот файл", callback_data=f"lost:d:{item['id']}"
         )
         keyboard = InlineKeyboardMarkup([buttons[:3], buttons[3:], [delete_button]])
-        if image:
-            await message.reply_photo(photo=image, caption=caption[:1000], reply_markup=keyboard)
+        if image and await _send_cover(message, image, caption, keyboard):
+            pass
+        elif image:
+            await message.reply_text(
+                caption + "\n⚠️ Обложку не получилось отправить.", reply_markup=keyboard
+            )
         else:
             await message.reply_text(caption + "\n⚠️ Обложку нарисовать не вышло.", reply_markup=keyboard)
     if page < pages - 1:
