@@ -68,7 +68,7 @@ class CoverPrebuildTest(unittest.TestCase):
             async def reply_text(self, text, reply_markup=None):
                 self.texts.append(text)
 
-            async def reply_photo(self, photo, caption=None, reply_markup=None):
+            async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
                 self.photos.append(caption)
 
         message = Message()
@@ -95,7 +95,7 @@ class CoverPrebuildTest(unittest.TestCase):
             async def reply_text(self, text, reply_markup=None):
                 self.texts.append(text)
 
-            async def reply_photo(self, photo, caption=None, reply_markup=None):
+            async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
                 if "Book 2" in caption:
                     raise RuntimeError("Bad Request: PHOTO_INVALID_DIMENSIONS")
                 self.photos.append(caption)
