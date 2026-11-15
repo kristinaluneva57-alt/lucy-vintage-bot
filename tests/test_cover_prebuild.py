@@ -110,6 +110,18 @@ class CoverPrebuildTest(unittest.TestCase):
         self.assertTrue(any("не получилось отправить" in t and "Book 2" in t for t in message.texts))
         self.assertTrue(any("Book 3" in c for c in message.photos))
 
+    def test_timeout_is_not_reported_as_failure(self):
+        class TimedOut(Exception):
+            pass
+
+        class Message:
+            texts = []
+
+            async def reply_photo(self, **kwargs):
+                raise TimedOut("Timed out")
+
+        self.assertTrue(asyncio.run(bot._send_cover(Message(), b"jpeg", "Book")))
+
 
 if __name__ == "__main__":
     unittest.main()
