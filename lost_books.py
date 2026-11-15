@@ -95,6 +95,29 @@ def lost_by_id(lost_id, r2_items=None, known=None):
     return None
 
 
+# --- удаление лишнего файла ---
+
+def delete_lost(storage_key, known=None):
+    """Удаляет из R2 PDF, которого НЕТ в каталоге (лишний скан, обложка-обрезок).
+
+    Книгу из каталога этим не удалить: такой ключ отклоняется. Заодно стирается
+    кешированная обложка. Возвращает True, если файл удалён.
+    """
+    if not storage_key.startswith(BOOK_PREFIX):
+        return False
+    known = known_storage_keys() if known is None else known
+    if storage_key in known:
+        return False
+    client = _r2()
+    bucket = os.environ["R2_BUCKET_NAME"]
+    client.delete_object(Bucket=bucket, Key=storage_key)
+    try:
+        client.delete_object(Bucket=bucket, Key=f"{CACHE_PREFIX}/{short_id(storage_key)}.jpg")
+    except Exception as error:
+        print(f"lost cover cache delete failed: {type(error).__name__}")
+    return True
+
+
 # --- обложка ---
 
 def _cache_get(key):
