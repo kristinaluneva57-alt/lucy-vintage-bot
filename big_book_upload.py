@@ -18,6 +18,7 @@ from flask import Flask, jsonify, request, render_template_string
 from telegram import Update
 from telegram.ext import ContextTypes
 
+import import_queue
 from library_importer import (
     OCR_LANGUAGES,
     diagnostic_lines,
@@ -330,12 +331,14 @@ async function uploadBook() {
 
     status("PDF загружен. Передаю Люсе на обработку...");
 
-    await api("/complete", {
+    const done = await api("/complete", {
       upload_id: prepared.upload_id
     });
 
     status(
-      "✅ Книга передана Люсе!\\n" +
+      "✅ Книга в очереди у Люси!\\n" +
+      (done.ahead ? "Перед ней книг: " + done.ahead + ". " : "") +
+      "Можно сразу загружать следующую.\\n" +
       "Файл: " + describe(file) + "\\n" +
       "Сессия: " + prepared.upload_id.slice(0, 8) + "\\n" +
       "Результат обработки придёт в Telegram."
@@ -455,15 +458,81 @@ def process_book(key, title, language, file_name=None, upload_id=None, generatio
             language=language
         )
         notify_admin(book_report(result, title, language, file_name, upload_id))
+        return None
 
-    except Exception:
+    except Exception as error:
         log.exception("Large book import failed")
         notify_admin(
             f"❌ Ошибка обработки книги «{title}».\n"
+            "PDF цел и лежит в хранилище — проверь /lost. "
             "Подробности находятся в Railway Logs."
         )
+        return f"{type(error).__name__}: {error}"
     finally:
         _finish_job(generation)
+
+
+# --- очередь: книги читаются строго по одной, очередь живёт в базе ---
+
+_worker_lock = threading.Lock()
+_worker_running = False
+
+
+def _drain_queue():
+    global _worker_running
+    while True:
+        with _worker_lock:
+            try:
+                item = import_queue.claim_next()
+            except Exception:
+                log.exception("Import queue read failed")
+                item = None
+            if item is None:
+                _worker_running = False
+                return
+        import_lock.acquire()
+        generation = _begin_job(item["title"], item.get("file_name"), item.get("upload_id"))
+        error = process_book(
+            item["storage_key"],
+            item["title"],
+            item["language"],
+            item.get("file_name"),
+            item.get("upload_id"),
+            generation,
+        )
+        try:
+            import_queue.finish(item["id"], error)
+        except Exception:
+            log.exception("Import queue update failed")
+
+
+def kick_queue():
+    """Запускает разбор очереди, если он ещё не идёт."""
+    global _worker_running
+    with _worker_lock:
+        if _worker_running:
+            return
+        _worker_running = True
+    threading.Thread(target=_drain_queue, daemon=True).start()
+
+
+def resume_queue_on_startup():
+    """После перезапуска: прерванные книги — снова в очередь, и поехали."""
+    try:
+        restored = import_queue.requeue_interrupted()
+        if restored:
+            print(f"import queue: {restored} interrupted book(s) back in queue")
+    except Exception:
+        log.exception("Import queue restore failed")
+    kick_queue()
+
+
+def enqueue_book(key, title, language, file_name=None, upload_id=None):
+    """Ставит книгу в очередь и запускает разбор. Возвращает, сколько книг перед ней."""
+    item_id, _ = import_queue.enqueue(key, title, language, file_name, upload_id)
+    ahead = import_queue.position(item_id)
+    kick_queue()
+    return ahead
 
 
 @web_app.post("/complete")
@@ -488,15 +557,7 @@ def complete():
         if time.time() - session["created"] > TOKEN_LIFETIME:
             return jsonify(error="Время загрузки истекло"), 410
 
-        if not import_lock.acquire(blocking=False):
-            return jsonify(
-                error="Люся уже обрабатывает другую большую книгу — проверь /importstatus в Telegram"
-            ), 409
-
-        session["state"] = "processing"
-        generation = _begin_job(
-            session["title"], session.get("file_name"), upload_id
-        )
+        session["state"] = "queued"
 
     try:
         info = r2_client().head_object(
@@ -511,29 +572,20 @@ def complete():
             f"bigbook upload: session={upload_id[:8]} key={session['key']} "
             f"declared={session['size']} r2={info['ContentLength']}"
         )
-        worker = threading.Thread(
-            target=process_book,
-            args=(
-                session["key"],
-                session["title"],
-                session["language"],
-                session.get("file_name"),
-                upload_id,
-                generation,
-            ),
-            daemon=True
-        )
-
-        worker.start()
-
-        return jsonify(status="processing")
-
     except Exception:
         with sessions_lock:
             session["state"] = "prepared"
-        _finish_job(generation)
         log.exception("Upload verification failed")
         return jsonify(error="Не удалось проверить PDF в R2"), 400
+
+    ahead = enqueue_book(
+        session["key"],
+        session["title"],
+        session["language"],
+        session.get("file_name"),
+        upload_id,
+    )
+    return jsonify(status="queued", ahead=ahead)
 
 
 @web_app.get("/health")
