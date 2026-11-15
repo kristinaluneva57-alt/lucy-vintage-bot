@@ -4819,6 +4819,7 @@ async def import_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- /covers: обложки загруженных книг · /lost: PDF в R2 без записи в каталоге ---
 
 COVERS_PER_PAGE = 10
+COVER_TIMEOUT = 60  # секунд на одну обложку, которой ещё нет в кеше
 LOST_LANGUAGES = ["eng", "deu", "ita", "fra", "rus"]
 
 
@@ -4848,15 +4849,29 @@ async def send_covers_page(message, page):
             caption += f"\nАвтор: {document['meta_author']}"
         icon, status = book_status(document)
         caption += f"\nСтраниц (OCR): {document['pages']} · {icon} {status}\nФайл: {document['file_title']}"
+        slow = False
         try:
-            image, _, _ = await asyncio.to_thread(
-                book_thumbnails.get_preview, document["code"], document["storage_key"], 1
+            # Обложки из кеша приходят мгновенно. Если обложку надо рисовать с нуля,
+            # а книга огромная — ждём не дольше минуты и идём дальше; рисование
+            # доделается в фоне и в следующий раз придёт из кеша.
+            image, _, _ = await asyncio.wait_for(
+                asyncio.to_thread(
+                    book_thumbnails.get_preview, document["code"], document["storage_key"], 1
+                ),
+                timeout=COVER_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            print(f"covers: preview slow for {document['code']}, continues in background")
+            image, slow = None, True
         except Exception as error:
             print(f"covers: preview failed for {document['code']}: {type(error).__name__}")
             image = None
         if image:
             await message.reply_photo(photo=image, caption=caption[:1000])
+        elif slow:
+            await message.reply_text(
+                "⏳ Обложка ещё рисуется (книга большая) — будет готова в следующий раз\n" + caption
+            )
         else:
             await message.reply_text("⚠️ Обложка недоступна\n" + caption)
     navigation = []

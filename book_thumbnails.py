@@ -68,12 +68,12 @@ def r2_put(key, data, content_type):
 
 # --- рендер (подменяется в тестах: fitz на сервере есть, локально может не быть) ---
 
-def render_pages(document_code, storage_key, pages=PREVIEW_PAGES):
-    """Скачивает PDF документа и рендерит первые страницы.
-    Возвращает (число страниц PDF, [(номер, JPEG, текст страницы)])."""
+def render_pages(document_code, storage_key, pages=PREVIEW_PAGES, local_path=None):
+    """Рендерит первые страницы PDF. Если PDF уже скачан (local_path) — берёт его,
+    иначе скачивает из R2. Возвращает (число страниц PDF, [(номер, JPEG, текст)])."""
     import fitz
 
-    path = page_images.pdf_path(document_code, storage_key)
+    path = local_path or page_images.pdf_path(document_code, storage_key)
     rendered = []
     with fitz.open(path) as pdf:
         total = pdf.page_count
@@ -115,8 +115,9 @@ def first_lines(text, limit=TEXT_LINES):
     return lines
 
 
-def build_preview(document_code, storage_key):
-    """Один проход по PDF: миниатюры стр. 1–3 и сводка → R2. Возвращает info."""
+def build_preview(document_code, storage_key, local_path=None):
+    """Один проход по PDF: миниатюры стр. 1–3 и сводка → R2. Возвращает info.
+    local_path — уже скачанный PDF (при загрузке книги): тогда ничего не качаем."""
     if not storage_key:
         raise PreviewUnavailable("у документа нет PDF в хранилище")
     with _build_lock:
@@ -125,7 +126,10 @@ def build_preview(document_code, storage_key):
         if cached:
             return cached
         try:
-            total, rendered = render_pages(document_code, storage_key)
+            if local_path:
+                total, rendered = render_pages(document_code, storage_key, local_path=local_path)
+            else:
+                total, rendered = render_pages(document_code, storage_key)
         except Exception as error:
             print(f"thumbnail render failed for {document_code}: {type(error).__name__}")
             raise PreviewUnavailable("не удалось прочитать PDF из хранилища") from error
