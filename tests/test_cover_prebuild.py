@@ -68,7 +68,7 @@ class CoverPrebuildTest(unittest.TestCase):
             async def reply_text(self, text, reply_markup=None):
                 self.texts.append(text)
 
-            async def reply_photo(self, photo, caption=None, reply_markup=None):
+            async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
                 self.photos.append(caption)
 
         message = Message()
@@ -95,7 +95,7 @@ class CoverPrebuildTest(unittest.TestCase):
             async def reply_text(self, text, reply_markup=None):
                 self.texts.append(text)
 
-            async def reply_photo(self, photo, caption=None, reply_markup=None):
+            async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
                 if "Book 2" in caption:
                     raise RuntimeError("Bad Request: PHOTO_INVALID_DIMENSIONS")
                 self.photos.append(caption)
@@ -109,6 +109,18 @@ class CoverPrebuildTest(unittest.TestCase):
         self.assertEqual(len(message.photos), 2)
         self.assertTrue(any("не получилось отправить" in t and "Book 2" in t for t in message.texts))
         self.assertTrue(any("Book 3" in c for c in message.photos))
+
+    def test_timeout_is_not_reported_as_failure(self):
+        class TimedOut(Exception):
+            pass
+
+        class Message:
+            texts = []
+
+            async def reply_photo(self, **kwargs):
+                raise TimedOut("Timed out")
+
+        self.assertTrue(asyncio.run(bot._send_cover(Message(), b"jpeg", "Book")))
 
 
 if __name__ == "__main__":

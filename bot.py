@@ -4890,9 +4890,17 @@ async def _send_cover(message, image, caption, keyboard=None):
     """Отправляет обложку. Если Telegram её не принял — не роняет весь список,
     а возвращает False (дальше идёт текстовая карточка и следующие книги)."""
     try:
-        await message.reply_photo(photo=image, caption=caption[:1000], reply_markup=keyboard)
+        await message.reply_photo(
+            photo=image, caption=caption[:1000], reply_markup=keyboard,
+            write_timeout=60, read_timeout=60,
+        )
         return True
     except Exception as error:
+        # TimedOut: Telegram часто уже принял фото, просто ответ пришёл поздно —
+        # тогда картинка всё равно появляется в чате, и «не получилось» было бы враньём.
+        if type(error).__name__ == "TimedOut":
+            print(f"cover send timed out (photo usually delivered): {error}")
+            return True
         print(f"cover send failed: {type(error).__name__}: {error}")
         return False
 
