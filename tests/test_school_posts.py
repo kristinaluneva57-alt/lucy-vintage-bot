@@ -308,3 +308,20 @@ class InGroup(unittest.TestCase):
         saved = school_posts.get_article(bot.DB_PATH, art["id"])
         self.assertEqual(saved["title"], "Почему стразы горят")
         self.assertIn("<i>фольгу</i>", bot.sp_parts(saved)[0])
+
+
+class ByName(InGroup):
+    def test_name_at_start(self):
+        ai = self.say(self.msg("Люся, как отличить бакелит?"))
+        self.assertTrue(ai.called)
+        self.assertEqual(ai.call_args[0][0][-1]["content"], "как отличить бакелит?")
+
+    def test_variants(self):
+        for t in ("люсь что такое гагат", "Люсенька! а стразы?", "ЛЮСЯ подскажи"):
+            self.assertIsNotNone(bot.strip_lucy_name(t), t)
+
+    def test_name_in_middle_is_silent(self):
+        for t in ("а Люся сегодня молодец", "Люсьена прислала брошь", "Люсячка"):
+            self.assertIsNone(bot.strip_lucy_name(t), t)
+        ai = self.say(self.msg("а Люся сегодня молодец"))
+        self.assertFalse(ai.called)
