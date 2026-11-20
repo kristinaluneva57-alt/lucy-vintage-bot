@@ -5206,14 +5206,72 @@ def sp_clean_copy(text_html):
     return text_html.strip()
 
 
+SP_LONG_TEXT = 1000  # такой длинный текст от Кристины — это статья, а не вопрос Люсе
+
+
+def sp_done_markup(article_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Всё, текст целиком", callback_data=f"sp:dn:{article_id}")],
+        [InlineKeyboardButton("🗑 Отмена", callback_data=f"sp:dl:{article_id}")],
+    ])
+
+
+async def sp_take_piece(message, context, article_id):
+    """Своя статья приходит кусками (Telegram сам режет длинный текст): склеиваем, пока не нажмёт «Всё»."""
+    article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+    changes = {}
+    if message.photo and not article.get("cover_file_id"):
+        changes["cover_file_id"] = message.photo[-1].file_id
+    caption = getattr(message, "caption", None)
+    raw = message.text_html if message.text else (message.caption_html if caption else "")
+    piece = sp_clean_copy(raw) if raw else ""
+    pieces = context.user_data.get("sp_pieces", 0)
+    if piece:
+        body = article["body"] or ""
+        if not body and not article["title"]:
+            first, _, rest = piece.partition("\n")
+            title = html.unescape(re.sub(r"<[^>]+>", "", first).strip())[:200]
+            changes["title"] = title or "Без названия"
+            changes["body"] = SP_HTML + rest.strip()
+        else:
+            base = body if body.startswith(SP_HTML) else SP_HTML + body
+            changes["body"] = base.rstrip() + "\n\n" + piece.strip()
+        pieces += 1
+        context.user_data["sp_pieces"] = pieces
+    if changes:
+        await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, **changes)
+    note = f"📥 Кусок {pieces} принят." if piece else "🖼 Обложку взяла."
+    await message.reply_text(
+        note + " Если это не весь текст — присылай дальше. Когда всё — жми «✅ Всё».",
+        reply_markup=sp_done_markup(article_id),
+    )
+
+
 async def sp_wait_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ответ Кристины на «Заменить текст / Дописать своё / Обложка». Перехватывает сообщение раньше остальных."""
     wait = context.user_data.get(SP_WAIT)
     user = update.effective_user
     message = update.message
-    if not wait or message is None or user is None or not is_admin(user.id):
+    if message is None or user is None or not is_admin(user.id):
         return
+    if not wait:
+        # Длинный текст без кнопки — это статья, а не вопрос: не тратим ИИ, сохраняем черновик.
+        long_text = len(message.text or getattr(message, "caption", None) or "")
+        if long_text < SP_LONG_TEXT:
+            return
+        article_id = await asyncio.to_thread(school_posts.create_article, DB_PATH, None, "своя статья", "", "", [])
+        context.user_data[SP_WAIT] = ("own", article_id)
+        context.user_data["sp_pieces"] = 0
+        await message.reply_text("Похоже, это статья, а не вопрос 🙂 Сохраняю как черновик для школы.")
+        await sp_take_piece(message, context, article_id)
+        raise ApplicationHandlerStop
     kind, article_id = wait
+    if kind == "own":
+        if await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id) is None:
+            context.user_data.pop(SP_WAIT, None)
+            return
+        await sp_take_piece(message, context, article_id)
+        raise ApplicationHandlerStop
     article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
     if article is None:
         context.user_data.pop(SP_WAIT, None)
@@ -5388,10 +5446,13 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "nw":
         # Своя готовая статья: пустой черновик и сразу ждём текст.
         new_id = await asyncio.to_thread(school_posts.create_article, DB_PATH, None, "своя статья", "", "", [])
-        context.user_data[SP_WAIT] = ("text", new_id)
+        context.user_data[SP_WAIT] = ("own", new_id)
+        context.user_data["sp_pieces"] = 0
         await message.reply_text(
-            "Пришли статью одним сообщением: первая строка — заголовок. Жирный и курсив сохранятся.\n"
-            "Если текст длиннее 4000 знаков — пришли первую часть, а остальное потом через «➕ Дописать своё»."
+            "Вставляй статью: первая строка — заголовок, жирный и курсив сохранятся.\n"
+            "Длинную Telegram порежет на несколько сообщений — это нормально, я склею. "
+            "Можно и фото с подписью: фото станет обложкой.\n"
+            "Когда всё пришло — жми «✅ Всё, текст целиком»."
         )
         return
     article_id = int(parts[2])
@@ -5419,7 +5480,14 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
         text, markup = sp_controls(article)
         await message.reply_text(text, reply_markup=markup)
+    elif action == "dn":
+        context.user_data.pop(SP_WAIT, None)
+        context.user_data.pop("sp_pieces", None)
+        await message.reply_text("Склеила, вот статья целиком. Теперь выбери тему и опубликуй:")
+        await sp_show(message, article_id)
     elif action == "dl":
+        if (context.user_data.get(SP_WAIT) or (None, None))[1] == article_id:
+            context.user_data.pop(SP_WAIT, None)
         await asyncio.to_thread(school_posts.delete_article, DB_PATH, article_id)
         await query.edit_message_text("🗑 Черновик удалён.")
 
