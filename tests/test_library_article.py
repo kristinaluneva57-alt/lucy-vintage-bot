@@ -392,5 +392,13 @@ class LibraryArticleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(FakeOpenAI.calls, [])
 
 
+    async def test_other_model_counts_cost(self):
+        # Статья из досье идёт через gpt-4.1 — раньше падало с NameError: ai_ledger.
+        _, job = await self.plan_coventry()
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        library_article.call_ai(bot.DB_PATH, job["id"], "part", messages, 100, model="gpt-4.1")
+        self.assertEqual(FakeOpenAI.calls[-1]["model"], "gpt-4.1")
+
+
 if __name__ == "__main__":
     unittest.main()

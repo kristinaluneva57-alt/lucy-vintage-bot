@@ -38,6 +38,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import ai_ledger
 import library_ai
 import library_search
 import lucy_ai
@@ -665,8 +666,6 @@ def _reserve(db_path, job_id, kind, estimate):
         conn.execute("BEGIN IMMEDIATE")
         try:
             _expire_stale(conn)
-            import ai_ledger
-
             total = ai_ledger.month_total(db_path)
             if total + estimate > ai_ledger.budget_month():
                 raise ArticleUnavailable(
