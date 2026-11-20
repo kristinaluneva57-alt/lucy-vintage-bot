@@ -305,8 +305,15 @@ class InGroup(unittest.TestCase):
         msg = chat.message(text="Стразы\nТекст", text_html="<b>Почему стразы горят</b>\nТекст про <i>фольгу</i>")
         with self.assertRaises(bot.ApplicationHandlerStop):
             run(bot.sp_wait_input(chat.update(message=msg), chat.context))
+        # Telegram порезал длинный текст — второй кусок приклеивается.
+        msg2 = chat.message(text="Вторая часть", text_html="Вторая часть про <b>AB</b>")
+        with self.assertRaises(bot.ApplicationHandlerStop):
+            run(bot.sp_wait_input(chat.update(message=msg2), chat.context))
+        run(chat.press(f"sp:dn:{art['id']}"))
+        self.assertNotIn(bot.SP_WAIT, chat.context.user_data)
         saved = school_posts.get_article(bot.DB_PATH, art["id"])
         self.assertEqual(saved["title"], "Почему стразы горят")
+        self.assertIn("Вторая часть про <b>AB</b>", saved["body"])
         self.assertIn("<i>фольгу</i>", bot.sp_parts(saved)[0])
 
 
@@ -325,3 +332,28 @@ class ByName(InGroup):
             self.assertIsNone(bot.strip_lucy_name(t), t)
         ai = self.say(self.msg("а Люся сегодня молодец"))
         self.assertFalse(ai.called)
+
+
+class LongTextIsArticle(unittest.TestCase):
+    """Кристина вставила статью без кнопки — Люся не отвечает ИИ, а сохраняет черновик."""
+
+    def test_long_text_becomes_draft(self):
+        helpers.fresh_database(bot)
+        school_posts.init_tables(bot.DB_PATH)
+        chat = Chat()
+        body = "Почему стразы горят\n" + "Фольга под камнем. " * 80
+        msg = chat.message(text=body)
+        with mock.patch.object(bot, "is_admin", return_value=True):
+            with self.assertRaises(bot.ApplicationHandlerStop):
+                run(bot.sp_wait_input(chat.update(message=msg), chat.context))
+        art = school_posts.drafts(bot.DB_PATH)[0]
+        self.assertEqual(art["title"], "Почему стразы горят")
+        self.assertEqual(chat.context.user_data[bot.SP_WAIT], ("own", art["id"]))
+
+    def test_short_question_goes_on(self):
+        helpers.fresh_database(bot)
+        school_posts.init_tables(bot.DB_PATH)
+        chat = Chat()
+        with mock.patch.object(bot, "is_admin", return_value=True):
+            run(bot.sp_wait_input(chat.update(message=chat.message(text="что такое бакелит?")), chat.context))
+        self.assertEqual(school_posts.drafts(bot.DB_PATH), [])
