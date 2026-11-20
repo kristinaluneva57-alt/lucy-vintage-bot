@@ -5464,7 +5464,15 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Запомнила: это тема «{school_posts.TOPIC_NAMES[slug]}».")
         return
     if action == "mk":
-        await sp_make(message, int(parts[2]))
+        try:
+            await sp_make(message, int(parts[2]))
+        except Exception as error:
+            # Раньше любая неожиданная ошибка здесь проходила молча — Кристина видела только «Пишу статью…».
+            print(f"sp_make failed: {type(error).__name__}: {error}")
+            await message.reply_text(
+                f"😿 Статья не получилась: {type(error).__name__}: {str(error)[:300]}\n"
+                "Пришли этот текст Claude. Досье цело — кнопку «✍️ Сделать статью» можно нажать ещё раз."
+            )
         return
     if action == "nw":
         # Своя готовая статья: пустой черновик и сразу ждём текст.
