@@ -369,3 +369,37 @@ class CoverNoDoubleTitle(unittest.TestCase):
         self.assertTrue(parts[0].startswith("Положите"), parts[0])
         art["cover_file_id"] = None
         self.assertIn("<b>Стразы</b>", bot.sp_parts(art)[0])
+
+
+class GroupByBooks(InGroup):
+    def test_book_answer_first(self):
+        frag = [{"n": 1, "title": "Book", "pdf_page": 5, "printed_page": None, "text": "clasp", "language": "en"}]
+        plan = types.SimpleNamespace(groups=[["clasp"]])
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "x"}), \
+                mock.patch.object(bot, "search_library", return_value=(plan, ["r"])), \
+                mock.patch("library_ai.select_fragments", return_value=frag), \
+                mock.patch("library_ai.query_key", return_value="k"), \
+                mock.patch("library_ai.find_cached", return_value=None), \
+                mock.patch("library_ai.save_answer", return_value=9), \
+                mock.patch("library_ai.ask", return_value="Булавка без замка — раньше [1]."):
+            ai = self.say(self.msg("Люся, как датировать по застёжке?"))
+        self.assertFalse(ai.called)  # общий ИИ не понадобился
+        self.assertIn("ОТВЕТ ПО КНИГАМ", self.out[-1])
+        self.assertIn("Book", self.out[-1])
+
+    def test_thin_books_fall_back(self):
+        frag = [{"n": 1, "title": "Book", "pdf_page": 5, "printed_page": None, "text": "x", "language": "en"}]
+        plan = types.SimpleNamespace(groups=[["x"]])
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "x"}), \
+                mock.patch.object(bot, "search_library", return_value=(plan, ["r"])), \
+                mock.patch("library_ai.select_fragments", return_value=frag), \
+                mock.patch("library_ai.ask", return_value="В найденных фрагментах об этом недостаточно сведений."):
+            ai = self.say(self.msg("Люся, что такое гагат?"))
+        self.assertTrue(ai.called)
+
+    def test_question_report(self):
+        self.say(self.msg("Люся, что такое бакелит?"), user=77)
+        report = "\n".join(bot.questions_report(7))
+        self.assertIn("что такое бакелит?", report)
+        self.assertIn("👥", report)
+        self.assertNotIn("бакелит", "\n".join(bot.questions_report(7, admin_ids=(77,))))

@@ -12,6 +12,7 @@ import library_article
 import school_posts
 import html
 from datetime import datetime
+import datetime as dt
 import research_engine
 import access
 import trials
@@ -241,6 +242,8 @@ def init_db():
 
     conn.commit()
     conn.close()
+    init_question_log(DB_PATH)
+
 def save_book(title, author, publication_year, publisher):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -2362,6 +2365,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "search":
         reset_anketa(context)
+        await asyncio.to_thread(log_question, update.effective_user.id, "search", text)
         await run_search(update, context, text)
         return
 
@@ -2455,6 +2459,7 @@ async def answer_free_question(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception:
         pass
 
+    await asyncio.to_thread(log_question, user_id, "ai", text)
     history = context.user_data.get("ai_history", [])
     messages = lucy_ai.build_messages(history, text)
 
@@ -5557,6 +5562,108 @@ def addressed_to_lucy(message, bot_id, username):
     return bool(username) and f"@{username.lower()}" in text.lower()
 
 
+async def group_answer_by_books(context, question):
+    """Ответ по книгам библиотеки для группы: (текст, кнопки «Оригинал») или None, если в книгах ничего нет.
+    Одинаковые вопросы берутся из кэша — второй раз не оплачиваются."""
+    if not library_ai.enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
+        return None
+    try:
+        plan, results = await asyncio.to_thread(search_library, question)
+        if not plan.groups or not results:
+            return None
+        fragments = library_ai.select_fragments(results)
+        if not fragments:
+            return None
+        key = await asyncio.to_thread(library_ai.query_key, DB_PATH, question)
+        cached = await asyncio.to_thread(library_ai.find_cached, DB_PATH, key)
+        if cached:
+            answer_id, answer, fragments = cached
+        else:
+            answer = await asyncio.to_thread(library_ai.ask, fragments, question)
+            answer_id = await asyncio.to_thread(library_ai.save_answer, DB_PATH, key, question, answer, fragments)
+    except lucy_ai.AIUnavailable as problem:
+        if problem.reason != "disabled":
+            await notify_admin_ai_problem(context, problem.reason)
+        return None
+    except Exception as error:
+        print(f"Group book answer failed: {type(error).__name__}: {error}")
+        return None
+    if library_ai.NOT_ENOUGH in answer:
+        return None  # в книгах мало — пусть ответит обычная Люся
+    reply, numbers = library_ai.format_reply(answer, fragments)
+    return reply, original_buttons(answer_id, numbers)
+
+
+# --- О чём спрашивают Люсю: журнал вопросов для статей ---
+
+def init_question_log(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS lucy_question_log ("
+            "id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, user_id INTEGER, "
+            "place TEXT NOT NULL, question TEXT NOT NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_question(user_id, place, question):
+    """place: group — вопрос в группе, ai — свободный вопрос в личке, search — поиск по книгам."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute(
+                "INSERT INTO lucy_question_log (created_at, user_id, place, question) VALUES (?, ?, ?, ?)",
+                (dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), user_id, place, question[:500]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as error:
+        print(f"Question log failed: {type(error).__name__}: {error}")
+
+
+def questions_report(days=7, admin_ids=()):
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT created_at, user_id, place, question FROM lucy_question_log WHERE created_at >= ? ORDER BY id",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+    rows = [r for r in rows if r[1] not in admin_ids]
+    if not rows:
+        return [f"❓ За {days} дн. вопросов от девочек не было."]
+    icons = {"group": "👥", "ai": "💬", "search": "🔎"}
+    head = (f"❓ О чём спрашивали Люсю за {days} дн.: {len(rows)} вопр. от {len({r[1] for r in rows})} участниц\n"
+            "👥 в группе · 💬 в личке · 🔎 поиск по книгам\n")
+    lines = [f"{icons.get(place, '•')} {created[5:10]} — {q}" for created, _, place, q in rows]
+    parts, cur = [], head
+    for line in lines:
+        if len(cur) + len(line) + 1 > 3800:
+            parts.append(cur)
+            cur = ""
+        cur += "\n" + line
+    parts.append(cur)
+    return parts
+
+
+@admin_only
+async def voprosy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/voprosy [дней] — что спрашивали девочки (без твоих вопросов)."""
+    try:
+        days = max(1, min(90, int(context.args[0]))) if context.args else 7
+    except ValueError:
+        days = 7
+    admins = tuple(int(x) for x in re.findall(r"\d+", os.environ.get("LUCY_ADMIN_ID", "")))
+    for part in await asyncio.to_thread(questions_report, days, admins):
+        await update.message.reply_text(part)
+
+
 async def lucy_me(context):
     """id и имя бота: берём из уже загруженного профиля, чтобы не спрашивать Telegram на каждое сообщение группы."""
     try:
@@ -5609,6 +5716,18 @@ async def group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            message_thread_id=getattr(message, "message_thread_id", None))
     except Exception:
         pass
+    await asyncio.to_thread(log_question, user_id, "group", question)
+    # Сначала — по книгам библиотеки: поиск бесплатный, в ИИ уходят 2–4 фрагмента страниц.
+    book = await group_answer_by_books(context, question)
+    if book is not None:
+        reply, markup = book
+        try:
+            if not unlimited:
+                lucy_ai.record_question(DB_PATH, user_id)
+        except Exception as error:
+            print(f"Group AI usage record failed: {type(error).__name__}: {error}")
+        await message.reply_text(reply + footer, reply_markup=markup)
+        return
     try:
         answer = await asyncio.to_thread(lucy_ai.ask_openai, lucy_ai.build_messages([], question))
     except lucy_ai.AIUnavailable as problem:
@@ -5734,6 +5853,7 @@ def main():
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
     app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^art:"))
     app.add_handler(CommandHandler("tema", tema_command))
+    app.add_handler(CommandHandler("voprosy", voprosy_command))
     app.add_handler(CommandHandler("statya", statya_command))
     app.add_handler(CallbackQueryHandler(sp_callback, pattern=r"^sp:"))
     # Люся в группе: отвечает по упоминанию или на ответ ей; приветствует новеньких.
