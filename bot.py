@@ -5199,6 +5199,7 @@ async def sp_make(message, job_id):
         answer = await asyncio.to_thread(
             library_article.call_ai, DB_PATH, job_id, "post",
             school_posts.post_messages(job["topic"], job["dossier"]), school_posts.POST_MAX_TOKENS,
+            school_posts.post_model(), 0.6,
         )
     except library_article.ArticleUnavailable as error:
         await message.reply_text(f"Не получилось: {library_article.pause_reason(error.reason)}.")
@@ -5210,6 +5211,12 @@ async def sp_make(message, job_id):
         school_posts.create_article, DB_PATH, job_id, job["topic"], title or job["topic"], body, sources
     )
     await sp_show(message, article_id)
+    photos = school_posts.photo_list(answer)
+    if photos:
+        await message.reply_text(
+            "📸 Что сфотографировать для этой статьи:\n" + "\n".join(f"— {p}" for p in photos)
+            + "\n\nФото добавишь кнопкой «🖼 Обложка» или отдельными сообщениями в теме после публикации."
+        )
 
 
 def sp_clean_copy(text_html):

@@ -403,3 +403,12 @@ class GroupByBooks(InGroup):
         self.assertIn("что такое бакелит?", report)
         self.assertIn("👥", report)
         self.assertNotIn("бакелит", "\n".join(bot.questions_report(7, admin_ids=(77,))))
+
+
+class PostQuality(unittest.TestCase):
+    def test_cite_tails_and_photos(self):
+        self.assertEqual(school_posts.strip_cites("век.,, [1], [2]\nTrifari [260-265] и"), "век.\nTrifari и")
+        title, body = school_posts.parse_post("ЗАГОЛОВОК: Застёжки\nВСТУПЛЕНИЕ: Привет [1]\nФОТО: брошь сзади")
+        self.assertNotIn("брошь сзади", body)
+        self.assertEqual(school_posts.photo_list("ФОТО: брошь сзади"), ["брошь сзади"])
+        self.assertEqual(school_posts.post_model(), "gpt-4.1")

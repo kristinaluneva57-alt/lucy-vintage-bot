@@ -719,8 +719,10 @@ def _finish_call(db_path, call_id, status, cost=0.0, input_tokens=0, output_toke
         conn.close()
 
 
-def call_ai(db_path, job_id, kind, messages, max_tokens):
-    """Один платный вызов: резерв → запрос → фактическая стоимость. Синхронно."""
+def call_ai(db_path, job_id, kind, messages, max_tokens, model=None, temperature=0.2):
+    """Один платный вызов: резерв → запрос → фактическая стоимость. Синхронно.
+    model — другая модель для этого вызова (например, статья пишется более сильной моделью)."""
+    model = model or MODEL
     if not library_ai.enabled():
         raise ArticleUnavailable("disabled")
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -728,7 +730,11 @@ def call_ai(db_path, job_id, kind, messages, max_tokens):
         raise ArticleUnavailable("no_key")
 
     chars = sum(len(m["content"]) for m in messages)
-    call_id = _reserve(db_path, job_id, kind, _call_estimate(chars, max_tokens))
+    if model == MODEL:
+        estimate = _call_estimate(chars, max_tokens)
+    else:
+        estimate = ai_ledger.token_cost(model, chars / CHARS_PER_TOKEN + OVERHEAD_TOKENS, max_tokens)
+    call_id = _reserve(db_path, job_id, kind, estimate)
 
     import openai
 
@@ -739,10 +745,10 @@ def call_ai(db_path, job_id, kind, messages, max_tokens):
     try:
         client = openai.OpenAI(api_key=api_key, timeout=AI_TIMEOUT, max_retries=1)
         response = client.chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=messages,
             max_completion_tokens=max_tokens,
-            temperature=0.2,
+            temperature=temperature,
         )
     except no_response as error:
         details = f"{type(error).__name__} · ответ не получен"
@@ -765,7 +771,7 @@ def call_ai(db_path, job_id, kind, messages, max_tokens):
     usage = getattr(response, "usage", None)
     input_tokens = getattr(usage, "prompt_tokens", 0) or 0
     output_tokens = getattr(usage, "completion_tokens", 0) or 0
-    value = visual_ai.cost(input_tokens, output_tokens)
+    value = visual_ai.cost(input_tokens, output_tokens) if model == MODEL else ai_ledger.token_cost(model, input_tokens, output_tokens)
     _finish_call(db_path, call_id, "done", value, input_tokens, output_tokens)
     choice = response.choices[0]
     text = (choice.message.content or "").strip()
