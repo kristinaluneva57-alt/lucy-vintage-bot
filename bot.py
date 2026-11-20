@@ -5359,14 +5359,13 @@ async def statya_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(SP_WAIT, None)
     items = await asyncio.to_thread(school_posts.drafts, DB_PATH, 12)
     text = (
-        "✍️ Статьи школы.\n\nНовая статья: /article тема → когда досье готово, кнопка «✍️ Сделать статью».\n"
+        "✍️ Статьи школы.\n\nНовая статья по книгам: /article тема → когда досье готово, кнопка «✍️ Сделать статью».\n"
+        "Своя готовая статья: кнопка «➕ Своя статья» ниже.\n"
         "Где какая тема группы: /tema"
     )
-    if not items:
-        await update.message.reply_text(text + "\n\nПока статей нет.")
-        return
-    rows = [[InlineKeyboardButton(f"{'✅' if a['status'] == 'published' else '📝'} {a['title'][:40]}",
+    rows = [[InlineKeyboardButton(f"{'✅' if a['status'] == 'published' else '📝'} {(a['title'] or a['theme'])[:40]}",
                                   callback_data=f"sp:op:{a['id']}")] for a in items]
+    rows.append([InlineKeyboardButton("➕ Своя статья (вставлю текст)", callback_data="sp:nw:0")])
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -5385,6 +5384,15 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if action == "mk":
         await sp_make(message, int(parts[2]))
+        return
+    if action == "nw":
+        # Своя готовая статья: пустой черновик и сразу ждём текст.
+        new_id = await asyncio.to_thread(school_posts.create_article, DB_PATH, None, "своя статья", "", "", [])
+        context.user_data[SP_WAIT] = ("text", new_id)
+        await message.reply_text(
+            "Пришли статью одним сообщением: первая строка — заголовок. Жирный и курсив сохранятся.\n"
+            "Если текст длиннее 4000 знаков — пришли первую часть, а остальное потом через «➕ Дописать своё»."
+        )
         return
     article_id = int(parts[2])
     if action == "op":
@@ -5414,6 +5422,145 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "dl":
         await asyncio.to_thread(school_posts.delete_article, DB_PATH, article_id)
         await query.edit_message_text("🗑 Черновик удалён.")
+
+
+# --- Люся в группе: отвечает, когда её отметили или ответили на её сообщение ---
+
+GROUP_FOOTER = "\n\n💌 Своя находка, шкатулка, поиск по книгам — в личке: @{bot}"
+
+
+def sp_related_articles(question, limit=2):
+    """Статьи школы по словам вопроса: совпадение слов из заголовка и текста (без ИИ, бесплатно)."""
+    words = {w for w in re.findall(r"[a-zA-Zа-яёА-ЯЁ]{4,}", question.lower())}
+    if not words:
+        return []
+    conn = school_posts.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM school_articles WHERE status = 'published' ORDER BY published_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    scored = []
+    for row in rows:
+        a = school_posts._row(row)
+        hay = (a["title"] + " " + a["theme"] + " " + a["body"]).lower()
+        # Совпадение по началу слова: «граната» находит «гранат».
+        score = sum(1 for w in words if w[:5] in hay)
+        if score:
+            scored.append((score, a))
+    scored.sort(key=lambda x: -x[0])
+    return [a for _, a in scored[:limit]]
+
+
+def addressed_to_lucy(message, bot_id, username):
+    """Сообщение обращено к Люсе: её отметили (@имя) или ответили на её сообщение."""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None and getattr(getattr(reply, "from_user", None), "id", None) == bot_id:
+        # Ответ на служебное сообщение темы (Telegram так помечает обычные сообщения в теме) — не считается.
+        if not getattr(reply, "forum_topic_created", None):
+            return True
+    text = message.text or ""
+    return bool(username) and f"@{username.lower()}" in text.lower()
+
+
+async def lucy_me(context):
+    """id и имя бота: берём из уже загруженного профиля, чтобы не спрашивать Telegram на каждое сообщение группы."""
+    try:
+        if context.bot.username:
+            return context.bot
+    except Exception:
+        pass
+    return await context.bot.get_me()
+
+
+async def group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message is None or not message.text or update.effective_user is None:
+        return
+    me = await lucy_me(context)
+    if not addressed_to_lucy(message, me.id, me.username):
+        return
+    question = re.sub(rf"@{re.escape(me.username or '')}", "", message.text, flags=re.IGNORECASE).strip(" ,.:—-\n")
+    footer = GROUP_FOOTER.format(bot=me.username)
+    if len(question) < 3:
+        await message.reply_text(
+            "Я тут 🤍 Спроси меня про украшения: материалы, эпохи, бренды, клейма, застёжки — "
+            "отмечай @" + me.username + " и пиши вопрос." + footer
+        )
+        return
+    if not lucy_ai.ai_enabled():
+        await message.reply_text("Сейчас я не могу отвечать в группе 🙈 Напиши мне в личку." + footer)
+        return
+    user_id = update.effective_user.id
+    unlimited = is_admin(user_id)
+    try:
+        if not unlimited:
+            if lucy_ai.used_today_total(DB_PATH) >= lucy_ai.daily_total_limit():
+                await message.reply_text("На сегодня я уже наотвечалась 🙈 Приходи завтра!")
+                return
+            if lucy_ai.used_today(DB_PATH, user_id) >= lucy_ai.daily_limit():
+                await message.reply_text(
+                    f"У тебя на сегодня закончились вопросы ({lucy_ai.daily_limit()} в день). Приходи завтра 🤍"
+                )
+                return
+    except Exception as error:
+        print(f"Group AI usage check failed: {type(error).__name__}: {error}")
+        return
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat.id, action="typing",
+                                           message_thread_id=getattr(message, "message_thread_id", None))
+    except Exception:
+        pass
+    try:
+        answer = await asyncio.to_thread(lucy_ai.ask_openai, lucy_ai.build_messages([], question))
+    except lucy_ai.AIUnavailable as problem:
+        if problem.reason != "disabled":
+            await notify_admin_ai_problem(context, problem.reason)
+        await message.reply_text("Ой, я сейчас не могу ответить 🙈 Попробуй чуть позже." + footer)
+        return
+    except Exception as error:
+        print(f"Group AI answer failed: {type(error).__name__}")
+        return
+    try:
+        if not unlimited:
+            lucy_ai.record_question(DB_PATH, user_id)
+    except Exception as error:
+        print(f"Group AI usage record failed: {type(error).__name__}: {error}")
+    reply = html.escape(lucy_ai.format_answer(answer), quote=False)
+    related = await asyncio.to_thread(sp_related_articles, question)
+    if related:
+        links = []
+        for a in related:
+            topic = await asyncio.to_thread(school_posts.get_topic, DB_PATH, a.get("topic_slug") or "")
+            first = (a.get("messages") or [None])[0]
+            if topic and first:
+                url = school_posts.message_link(topic["chat_id"], first, topic["thread_id"])
+                links.append(f"📖 <a href=\"{url}\">{html.escape(a['title'], quote=False)}</a>")
+        if links:
+            reply += "\n\nПочитай у нас в школе:\n" + "\n".join(links)
+    reply += html.escape(footer, quote=False)
+    await message.reply_text(reply, parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Новенькая в группе — короткое приветствие и куда идти."""
+    message = update.message
+    if message is None or not getattr(message, "new_chat_members", None):
+        return
+    me = await lucy_me(context)
+    names = [m.first_name for m in message.new_chat_members if not m.is_bot]
+    if not names:
+        return
+    start = await asyncio.to_thread(school_posts.get_topic, DB_PATH, "start")
+    where = "Загляни в тему «Старт» — там правила и навигация."
+    if start and start.get("thread_id"):
+        where = f"Загляни в тему «Старт» — там правила и навигация: {school_posts.message_link(start['chat_id'], start['thread_id'])}"
+    await message.reply_text(
+        f"Привет, {', '.join(names)}! Добро пожаловать в OH MY GOD VINTAGE School 🤍\n\n{where}\n"
+        f"Я Люся, помощница школы. Спрашивай меня прямо здесь — отметь @{me.username} — "
+        f"или пиши в личку: там твоя шкатулка находок и поиск по книгам."
+    )
 
 
 def make_persistence():
@@ -5492,6 +5639,9 @@ def main():
     app.add_handler(CommandHandler("tema", tema_command))
     app.add_handler(CommandHandler("statya", statya_command))
     app.add_handler(CallbackQueryHandler(sp_callback, pattern=r"^sp:"))
+    # Люся в группе: отвечает по упоминанию или на ответ ей; приветствует новеньких.
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS, group_welcome))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_message))
     # Ответ Кристины в редакции (новый текст, дописка, обложка) — раньше всех остальных обработчиков.
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, sp_wait_input), group=-1)
     app.add_handler(CallbackQueryHandler(research_callback, pattern=r"^rs:"))

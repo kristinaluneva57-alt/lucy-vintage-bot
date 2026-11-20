@@ -239,3 +239,72 @@ class Flow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InGroup(unittest.TestCase):
+    """Люся в группе: отвечает только когда её позвали, со ссылкой на статью школы."""
+
+    def setUp(self):
+        helpers.fresh_database(bot)
+        school_posts.init_tables(bot.DB_PATH)
+        lucy = __import__("lucy_ai")
+        lucy.init_ai_usage_table(bot.DB_PATH)
+        self.out = []
+        out = self.out
+
+        async def get_me():
+            return types.SimpleNamespace(id=4242, username="LucyVintageBot")
+
+        async def noop(*a, **k):
+            return None
+
+        self.context = types.SimpleNamespace(user_data={}, bot=types.SimpleNamespace(
+            id=4242, username="LucyVintageBot", get_me=get_me, send_chat_action=noop))
+
+        def msg(text, reply_to=None, user=1):
+            async def reply_text(t, **k):
+                out.append(t)
+            return types.SimpleNamespace(
+                text=text, chat=types.SimpleNamespace(id=GROUP), message_thread_id=7,
+                reply_to_message=reply_to, reply_text=reply_text,
+            )
+        self.msg = msg
+
+    def say(self, message, user=1):
+        update = types.SimpleNamespace(message=message, effective_user=types.SimpleNamespace(id=user))
+        with mock.patch.dict("os.environ", {"LUCY_AI_ENABLED": "1"}), \
+                mock.patch("lucy_ai.ask_openai", return_value="Богемский гранат — тёмно-красный.") as ai:
+            run(bot.group_message(update, self.context))
+        return ai
+
+    def test_silent_unless_called(self):
+        ai = self.say(self.msg("девочки, смотрите какой гранат"))
+        self.assertFalse(ai.called)
+        self.assertEqual(self.out, [])
+
+    def test_answers_mention_with_school_article(self):
+        school_posts.save_topic(bot.DB_PATH, "lab", GROUP, 7)
+        aid = school_posts.create_article(bot.DB_PATH, 1, "гранат", "Богемский гранат", "Гранат из Чехии", [])
+        school_posts.update_article(bot.DB_PATH, aid, topic_slug="lab", status="published", messages=[555])
+        ai = self.say(self.msg("@LucyVintageBot как узнать богемский гранат?"))
+        self.assertTrue(ai.called)
+        question = ai.call_args[0][0][-1]["content"]
+        self.assertNotIn("@LucyVintageBot", question)
+        self.assertIn("тёмно-красный", self.out[-1])
+        self.assertIn("https://t.me/c/1234567890/7/555", self.out[-1])
+
+    def test_reply_to_lucy_counts(self):
+        lucy_msg = types.SimpleNamespace(from_user=types.SimpleNamespace(id=4242), forum_topic_created=None)
+        ai = self.say(self.msg("а янтарь?", reply_to=lucy_msg))
+        self.assertTrue(ai.called)
+
+    def test_own_article_from_statya(self):
+        chat = Chat()
+        run(chat.press("sp:nw:0"))
+        art = school_posts.drafts(bot.DB_PATH)[0]
+        msg = chat.message(text="Стразы\nТекст", text_html="<b>Почему стразы горят</b>\nТекст про <i>фольгу</i>")
+        with self.assertRaises(bot.ApplicationHandlerStop):
+            run(bot.sp_wait_input(chat.update(message=msg), chat.context))
+        saved = school_posts.get_article(bot.DB_PATH, art["id"])
+        self.assertEqual(saved["title"], "Почему стразы горят")
+        self.assertIn("<i>фольгу</i>", bot.sp_parts(saved)[0])
