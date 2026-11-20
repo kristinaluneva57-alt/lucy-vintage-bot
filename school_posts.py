@@ -328,7 +328,7 @@ def render_body(body):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
-def render_parts(article, body_html=None):
+def render_parts(article, body_html=None, with_title=True):
     """Готовые к отправке куски (HTML), каждый ≤ MAX_MESSAGE.
     Первый кусок — заголовок и начало; последний заканчивается источниками и подписью школы.
     body_html — уже готовое тело (текст, который Кристина прислала сама); иначе собираем из article["body"]."""
@@ -338,7 +338,7 @@ def render_parts(article, body_html=None):
     if article.get("sources"):
         tail = "\n\n<i>📖 По книгам библиотеки школы:</i>\n" + "\n".join(f"<i>· {_esc(s)}</i>" for s in article["sources"])
     tail += "\n\n✦ OH MY GOD VINTAGE School"
-    paragraphs = [head] + [p for p in body.split("\n\n") if p.strip()] + [tail.strip()]
+    paragraphs = ([head] if with_title else []) + [p for p in body.split("\n\n") if p.strip()] + [tail.strip()]
     parts, cur = [], ""
     for p in paragraphs:
         chunk = p if not cur else cur + "\n\n" + p

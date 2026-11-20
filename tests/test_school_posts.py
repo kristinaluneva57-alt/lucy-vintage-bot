@@ -357,3 +357,15 @@ class LongTextIsArticle(unittest.TestCase):
         with mock.patch.object(bot, "is_admin", return_value=True):
             run(bot.sp_wait_input(chat.update(message=chat.message(text="что такое бакелит?")), chat.context))
         self.assertEqual(school_posts.drafts(bot.DB_PATH), [])
+
+
+class CoverNoDoubleTitle(unittest.TestCase):
+    def test_title_once_and_byline_gone(self):
+        art = {"id": 1, "title": "Стразы", "theme": "", "sources": [],
+               "body": bot.SP_HTML + "20 нояб. 2026 г. · @Кристина Лунева\nПоложите рядом две броши.",
+               "cover_file_id": "PHOTO"}
+        parts = bot.sp_parts(art)
+        self.assertNotIn("<b>Стразы</b>", parts[0])
+        self.assertTrue(parts[0].startswith("Положите"), parts[0])
+        art["cover_file_id"] = None
+        self.assertIn("<b>Стразы</b>", bot.sp_parts(art)[0])
