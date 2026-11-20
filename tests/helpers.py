@@ -88,6 +88,7 @@ def _stub_missing_modules():
         for name in ("Application", "CommandHandler", "CallbackQueryHandler", "MessageHandler"):
             setattr(ext, name, _Plain)
         ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
+        ext.ApplicationHandlerStop = type("ApplicationHandlerStop", (Exception,), {})
         ext.filters = _Filter()
         sys.modules["telegram"] = telegram
         sys.modules["telegram.ext"] = ext
