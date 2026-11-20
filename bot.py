@@ -5453,6 +5453,18 @@ def sp_related_articles(question, limit=2):
     return [a for _, a in scored[:limit]]
 
 
+# «Люся, ...», «Люсь ...», «Люсенька ...» в начале сообщения — тоже обращение к ней.
+LUCY_NAME_RE = re.compile(r"^\s*(люся|люсь|люсенька|люсечка|люсёк|lucy)(?=[\s,!:.?—-]|$)[\s,!:.—-]*", re.IGNORECASE)
+
+
+def strip_lucy_name(text):
+    """Текст без имени в начале, или None, если сообщение не начинается с имени Люси."""
+    match = LUCY_NAME_RE.match(text or "")
+    if not match:
+        return None
+    return text[match.end():]
+
+
 def addressed_to_lucy(message, bot_id, username):
     """Сообщение обращено к Люсе: её отметили (@имя) или ответили на её сообщение."""
     reply = getattr(message, "reply_to_message", None)
@@ -5461,6 +5473,8 @@ def addressed_to_lucy(message, bot_id, username):
         if not getattr(reply, "forum_topic_created", None):
             return True
     text = message.text or ""
+    if strip_lucy_name(text) is not None:
+        return True
     return bool(username) and f"@{username.lower()}" in text.lower()
 
 
@@ -5481,12 +5495,16 @@ async def group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     me = await lucy_me(context)
     if not addressed_to_lucy(message, me.id, me.username):
         return
-    question = re.sub(rf"@{re.escape(me.username or '')}", "", message.text, flags=re.IGNORECASE).strip(" ,.:—-\n")
+    question = re.sub(rf"@{re.escape(me.username or '')}", "", message.text, flags=re.IGNORECASE)
+    by_name = strip_lucy_name(question)
+    if by_name is not None:
+        question = by_name
+    question = question.strip(" ,.:—-\n")
     footer = GROUP_FOOTER.format(bot=me.username)
     if len(question) < 3:
         await message.reply_text(
             "Я тут 🤍 Спроси меня про украшения: материалы, эпохи, бренды, клейма, застёжки — "
-            "отмечай @" + me.username + " и пиши вопрос." + footer
+            "начни сообщение с «Люся» и пиши вопрос." + footer
         )
         return
     if not lucy_ai.ai_enabled():
@@ -5558,7 +5576,7 @@ async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         where = f"Загляни в тему «Старт» — там правила и навигация: {school_posts.message_link(start['chat_id'], start['thread_id'])}"
     await message.reply_text(
         f"Привет, {', '.join(names)}! Добро пожаловать в OH MY GOD VINTAGE School 🤍\n\n{where}\n"
-        f"Я Люся, помощница школы. Спрашивай меня прямо здесь — отметь @{me.username} — "
+        f"Я Люся, помощница школы. Спрашивай меня прямо здесь: «Люся, что такое бакелит?» — "
         f"или пиши в личку: там твоя шкатулка находок и поиск по книгам."
     )
 
