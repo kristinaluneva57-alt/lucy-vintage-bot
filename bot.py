@@ -9,6 +9,9 @@ import library_search
 import library_ai
 import library_story
 import library_article
+import school_posts
+import html
+from datetime import datetime
 import research_engine
 import access
 import trials
@@ -48,6 +51,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    ApplicationHandlerStop,
     filters,
 )
 
@@ -4258,6 +4262,10 @@ async def send_article_result(message, job_id):
         )
     except Exception as error:
         print(f"Article file failed: {type(error).__name__}: {error}")
+    await message.reply_text(
+        "Сделать из досье статью для группы? Люся напишет черновик, ты поправишь и опубликуешь.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Сделать статью", callback_data=f"sp:mk:{job_id}")]]),
+    )
 
 
 async def article_worker(message, job_id):
@@ -5110,6 +5118,304 @@ async def command_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await route_text_command(update, context)
 
 
+# --- Редакция школы: статьи в темы группы (school_posts.py) ---
+
+SP_WAIT = "sp_wait"   # ждём от Кристины: ("text"|"add"|"cover", id статьи)
+SP_HTML = "<!--html-->"  # тело, которое Кристина прислала своим текстом (с её жирным и курсивом)
+
+
+def sp_render_body(body):
+    if body.startswith(SP_HTML):
+        return school_posts.strip_cites(body[len(SP_HTML):]).strip()
+    return school_posts.render_body(body)
+
+
+def sp_parts(article):
+    """Куски статьи для Telegram. Своё тело Кристины (HTML) не перерабатываем."""
+    if article["body"].startswith(SP_HTML):
+        return school_posts.render_parts(article, sp_render_body(article["body"]))
+    return school_posts.render_parts(article)
+
+
+def sp_controls(article):
+    topic = school_posts.TOPIC_NAMES.get(article.get("topic_slug") or "", "не выбрана")
+    published = article["status"] == "published"
+    lines = [
+        f"✍️ Статья №{article['id']} · {'опубликована ✅' if published else 'черновик'}",
+        f"📍 Тема группы: {topic}",
+        f"🖼 Обложка: {'есть' if article.get('cover_file_id') else 'нет'}",
+        "",
+        "Как поправить: скопируй статью выше, исправь и пришли мне целиком — или допиши своё.",
+    ]
+    rows = [
+        [InlineKeyboardButton("📍 Выбрать тему", callback_data=f"sp:to:{article['id']}"),
+         InlineKeyboardButton("🖼 Обложка", callback_data=f"sp:cv:{article['id']}")],
+        [InlineKeyboardButton("✏️ Заменить текст", callback_data=f"sp:rt:{article['id']}"),
+         InlineKeyboardButton("➕ Дописать своё", callback_data=f"sp:ad:{article['id']}")],
+        [InlineKeyboardButton("🔄 Обновить в группе" if published else "✅ Опубликовать", callback_data=f"sp:pb:{article['id']}")],
+    ]
+    if not published:
+        rows.append([InlineKeyboardButton("🗑 Удалить черновик", callback_data=f"sp:dl:{article['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def sp_show(message, article_id):
+    article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+    if article is None:
+        await message.reply_text("Такой статьи нет.")
+        return
+    if article.get("cover_file_id"):
+        await message.reply_photo(article["cover_file_id"], caption="🖼 Обложка статьи")
+    for part in sp_parts(article):
+        await message.reply_text(part, parse_mode="HTML", disable_web_page_preview=True)
+    text, markup = sp_controls(article)
+    await message.reply_text(text, reply_markup=markup)
+
+
+async def sp_make(message, job_id):
+    """Досье → статья: один вызов ИИ, только факты досье, источники добавляет бот."""
+    job = await asyncio.to_thread(library_article.get_job, DB_PATH, job_id)
+    if not job or job["status"] != "done" or not job.get("dossier"):
+        await message.reply_text("Досье ещё не готово. Сначала: /article тема")
+        return
+    await message.reply_text(f"✍️ Пишу статью «{job['topic']}» по досье… Это минута.")
+    try:
+        answer = await asyncio.to_thread(
+            library_article.call_ai, DB_PATH, job_id, "post",
+            school_posts.post_messages(job["topic"], job["dossier"]), school_posts.POST_MAX_TOKENS,
+        )
+    except library_article.ArticleUnavailable as error:
+        await message.reply_text(f"Не получилось: {library_article.pause_reason(error.reason)}.")
+        return
+    title, body = school_posts.parse_post(answer)
+    fragments = job["research"]["fragments"]
+    sources = school_posts.sources_for(answer, fragments, library_article.source_line)
+    article_id = await asyncio.to_thread(
+        school_posts.create_article, DB_PATH, job_id, job["topic"], title or job["topic"], body, sources
+    )
+    await sp_show(message, article_id)
+
+
+def sp_clean_copy(text_html):
+    """Статья, которую Кристина скопировала из превью и прислала обратно: убираем источники и подпись."""
+    cut = text_html.find("📖 По книгам библиотеки школы")
+    if cut >= 0:
+        text_html = text_html[:cut]
+    text_html = text_html.replace("✦ OH MY GOD VINTAGE School", "")
+    text_html = re.sub(r"(<i>\s*</i>|\s)+$", "", text_html)
+    return text_html.strip()
+
+
+async def sp_wait_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ответ Кристины на «Заменить текст / Дописать своё / Обложка». Перехватывает сообщение раньше остальных."""
+    wait = context.user_data.get(SP_WAIT)
+    user = update.effective_user
+    message = update.message
+    if not wait or message is None or user is None or not is_admin(user.id):
+        return
+    kind, article_id = wait
+    article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+    if article is None:
+        context.user_data.pop(SP_WAIT, None)
+        return
+    if kind == "cover":
+        if not message.photo:
+            await message.reply_text("Пришли фото для обложки (или /statya, чтобы выйти).")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, cover_file_id=message.photo[-1].file_id)
+    else:
+        if not message.text:
+            await message.reply_text("Пришли текстом (или /statya, чтобы выйти).")
+            raise ApplicationHandlerStop
+        new = sp_clean_copy(message.text_html)
+        if kind == "text":
+            first, _, rest = new.partition("\n")
+            title = re.sub(r"<[^>]+>", "", first).strip() or article["title"]
+            await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, title=html.unescape(title), body=SP_HTML + rest.strip())
+        else:  # add
+            old = article["body"]
+            base = old if old.startswith(SP_HTML) else SP_HTML + school_posts.render_body(old)
+            await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, body=f"{base}\n\n<b>💬 От Кристины</b>\n{new}")
+    context.user_data.pop(SP_WAIT, None)
+    await message.reply_text("Готово, вот как статья выглядит теперь:")
+    await sp_show(message, article_id)
+    raise ApplicationHandlerStop
+
+
+async def sp_publish(message, context, article_id):
+    article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+    slug = article.get("topic_slug")
+    if not slug:
+        await message.reply_text("Сначала выбери тему группы: «📍 Выбрать тему».")
+        return
+    topic = await asyncio.to_thread(school_posts.get_topic, DB_PATH, slug)
+    if not topic:
+        await message.reply_text(
+            f"Я ещё не знаю, где в группе тема «{school_posts.TOPIC_NAMES[slug]}».\n"
+            "Зайди в эту тему в группе и напиши там /tema — я спрошу, что это за тема."
+        )
+        return
+    bot = context.bot
+    chat_id, thread_id = topic["chat_id"], topic["thread_id"]
+    parts = sp_parts(article)
+    old = article.get("messages") or []
+    has_cover = bool(article.get("cover_file_id"))
+    try:
+        new_ids = []
+        expected = len(parts) + (1 if has_cover else 0)
+        if article["status"] == "published" and len(old) == expected:
+            # Правка опубликованной статьи: меняем те же сообщения — ссылки в оглавлении не ломаются.
+            k = 0
+            if has_cover:
+                await bot.edit_message_caption(chat_id, old[0], caption=f"<b>{html.escape(article['title'])}</b>", parse_mode="HTML")
+                k = 1
+            for i, part in enumerate(parts):
+                try:
+                    await bot.edit_message_text(part, chat_id, old[k + i], parse_mode="HTML", disable_web_page_preview=True)
+                except Exception as error:  # текст не изменился — Telegram отвечает ошибкой, это нормально
+                    if "not modified" not in str(error):
+                        raise
+            new_ids = old
+        else:
+            for mid in old:  # число кусков изменилось — старые убираем, публикуем заново
+                try:
+                    await bot.delete_message(chat_id, mid)
+                except Exception:
+                    pass
+            if has_cover:
+                sent = await bot.send_photo(chat_id, article["cover_file_id"], caption=f"<b>{html.escape(article['title'])}</b>",
+                                            parse_mode="HTML", message_thread_id=thread_id)
+                new_ids.append(sent.message_id)
+            for part in parts:
+                sent = await bot.send_message(chat_id, part, parse_mode="HTML", disable_web_page_preview=True,
+                                              message_thread_id=thread_id)
+                new_ids.append(sent.message_id)
+        fields = {"messages": new_ids, "status": "published"}
+        if article["status"] != "published":
+            fields["published_at"] = datetime.now(lucy_ai.TIMEZONE).isoformat(timespec="seconds")
+        await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, **fields)
+        await sp_update_toc(bot, slug)
+    except Exception as error:
+        print(f"School publish failed: {type(error).__name__}: {error}")
+        await message.reply_text(
+            "❌ Telegram не дал опубликовать. Проверь, что я админ группы с правом писать и закреплять сообщения, "
+            "и что тема не закрыта."
+        )
+        return
+    await message.reply_text(
+        f"✅ Статья в теме «{school_posts.TOPIC_NAMES[slug]}»: {school_posts.message_link(chat_id, new_ids[0], thread_id)}\n"
+        "Оглавление темы обновлено."
+    )
+
+
+async def sp_update_toc(bot, slug):
+    """Закреплённое оглавление темы: правим старое или ставим новое и закрепляем."""
+    topic = await asyncio.to_thread(school_posts.get_topic, DB_PATH, slug)
+    articles = await asyncio.to_thread(school_posts.published_in_topic, DB_PATH, slug)
+    text = school_posts.toc_text(slug, articles, topic["chat_id"], topic["thread_id"])
+    if topic.get("toc_message_id"):
+        try:
+            await bot.edit_message_text(text, topic["chat_id"], topic["toc_message_id"], parse_mode="HTML",
+                                        disable_web_page_preview=True)
+            return
+        except Exception as error:
+            if "not modified" in str(error):
+                return
+            print(f"TOC edit failed, posting new: {type(error).__name__}: {error}")
+    sent = await bot.send_message(topic["chat_id"], text, parse_mode="HTML", disable_web_page_preview=True,
+                                  message_thread_id=topic["thread_id"])
+    try:
+        await bot.pin_chat_message(topic["chat_id"], sent.message_id, disable_notification=True)
+    except Exception as error:
+        print(f"TOC pin failed: {type(error).__name__}: {error}")
+    await asyncio.to_thread(school_posts.set_toc_message, DB_PATH, slug, sent.message_id)
+
+
+@admin_only
+async def tema_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/tema в теме группы — Люся запоминает, какая это тема."""
+    message = update.message
+    if message.chat.type == "private":
+        lines = ["📍 Темы группы, которые я знаю:", ""]
+        for slug, name, known in await asyncio.to_thread(school_posts.topics_status, DB_PATH):
+            lines.append(f"{'✅' if known else '▫️'} {name}")
+        lines += ["", "Чтобы я узнала тему: зайди в неё в группе и напиши там /tema."]
+        await message.reply_text("\n".join(lines))
+        return
+    rows, row = [], []
+    for slug, name in school_posts.TOPICS:
+        row.append(InlineKeyboardButton(name, callback_data=f"sp:tm:{slug}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    await message.reply_text("Какая это тема?", reply_markup=InlineKeyboardMarkup(rows))
+
+
+@admin_only
+async def statya_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/statya — черновики и опубликованные статьи."""
+    context.user_data.pop(SP_WAIT, None)
+    items = await asyncio.to_thread(school_posts.drafts, DB_PATH, 12)
+    text = (
+        "✍️ Статьи школы.\n\nНовая статья: /article тема → когда досье готово, кнопка «✍️ Сделать статью».\n"
+        "Где какая тема группы: /tema"
+    )
+    if not items:
+        await update.message.reply_text(text + "\n\nПока статей нет.")
+        return
+    rows = [[InlineKeyboardButton(f"{'✅' if a['status'] == 'published' else '📝'} {a['title'][:40]}",
+                                  callback_data=f"sp:op:{a['id']}")] for a in items]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+    parts = query.data.split(":")
+    action = parts[1]
+    message = query.message
+    if action == "tm":
+        slug = parts[2]
+        await asyncio.to_thread(school_posts.save_topic, DB_PATH, slug, message.chat.id, message.message_thread_id)
+        await query.edit_message_text(f"✅ Запомнила: это тема «{school_posts.TOPIC_NAMES[slug]}».")
+        return
+    if action == "mk":
+        await sp_make(message, int(parts[2]))
+        return
+    article_id = int(parts[2])
+    if action == "op":
+        await sp_show(message, article_id)
+    elif action == "to":
+        rows = [[InlineKeyboardButton(school_posts.TOPIC_NAMES[s], callback_data=f"sp:st:{article_id}:{s}")]
+                for s in school_posts.ARTICLE_TOPICS]
+        await message.reply_text("В какую тему?", reply_markup=InlineKeyboardMarkup(rows))
+    elif action == "st":
+        await asyncio.to_thread(school_posts.update_article, DB_PATH, article_id, topic_slug=parts[3])
+        article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+        text, markup = sp_controls(article)
+        await query.edit_message_text(text, reply_markup=markup)
+    elif action in ("rt", "ad", "cv"):
+        kind = {"rt": "text", "ad": "add", "cv": "cover"}[action]
+        context.user_data[SP_WAIT] = (kind, article_id)
+        await message.reply_text({
+            "text": "Пришли статью целиком одним сообщением: первая строка — заголовок. Жирный и курсив сохранятся.",
+            "add": "Пришли, что дописать. Добавлю в конец блоком «💬 От Кристины».",
+            "cover": "Пришли фото для обложки.",
+        }[kind])
+    elif action == "pb":
+        await sp_publish(message, context, article_id)
+        article = await asyncio.to_thread(school_posts.get_article, DB_PATH, article_id)
+        text, markup = sp_controls(article)
+        await message.reply_text(text, reply_markup=markup)
+    elif action == "dl":
+        await asyncio.to_thread(school_posts.delete_article, DB_PATH, article_id)
+        await query.edit_message_text("🗑 Черновик удалён.")
+
+
 def make_persistence():
     """Диалог (шаг анкеты, последнее фото, открытая карточка) переживает деплой.
 
@@ -5134,6 +5440,7 @@ def main():
     library_ai.init_tables(DB_PATH)
     library_story.init_tables(DB_PATH)
     library_article.init_tables(DB_PATH)
+    school_posts.init_tables(DB_PATH)
     research_engine.init_tables(DB_PATH)
     access.init_tables(DB_PATH)
     ai_ledger.init_tables(DB_PATH)
@@ -5182,6 +5489,11 @@ def main():
     app.add_handler(CallbackQueryHandler(edit_callback, pattern=r"^(edit|edone|ef|ep):"))
     app.add_handler(CallbackQueryHandler(library_original_callback, pattern=r"^lorig:"))
     app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^art:"))
+    app.add_handler(CommandHandler("tema", tema_command))
+    app.add_handler(CommandHandler("statya", statya_command))
+    app.add_handler(CallbackQueryHandler(sp_callback, pattern=r"^sp:"))
+    # Ответ Кристины в редакции (новый текст, дописка, обложка) — раньше всех остальных обработчиков.
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, sp_wait_input), group=-1)
     app.add_handler(CallbackQueryHandler(research_callback, pattern=r"^rs:"))
     app.add_handler(CallbackQueryHandler(covers_callback, pattern=r"^cv:"))
     app.add_handler(CallbackQueryHandler(lost_callback, pattern=r"^lost:"))
