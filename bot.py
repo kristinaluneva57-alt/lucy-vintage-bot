@@ -5130,11 +5130,22 @@ def sp_render_body(body):
     return school_posts.render_body(body)
 
 
+# Шапка из дока («20 нояб. 2026 г. · @Кристина Лунева»), скопированная вместе со статьёй.
+SP_BYLINE_RE = re.compile(r"^\s*(?:<[^>]+>)*\s*\d{1,2}[ .][^\n]{0,20}\d{4}[^\n]{0,8}·[^\n]*\n?")
+
+
+def sp_strip_byline(body_html):
+    return SP_BYLINE_RE.sub("", body_html.lstrip("\n"), count=1)
+
+
 def sp_parts(article):
-    """Куски статьи для Telegram. Своё тело Кристины (HTML) не перерабатываем."""
+    """Куски статьи для Telegram. Своё тело Кристины (HTML) не перерабатываем.
+    Если есть обложка, заголовок уже стоит под фото — второй раз в тексте его не повторяем."""
+    with_title = not article.get("cover_file_id")
     if article["body"].startswith(SP_HTML):
-        return school_posts.render_parts(article, sp_render_body(article["body"]))
-    return school_posts.render_parts(article)
+        body = sp_strip_byline(sp_render_body(article["body"]))
+        return school_posts.render_parts(article, body, with_title=with_title)
+    return school_posts.render_parts(article, with_title=with_title)
 
 
 def sp_controls(article):
