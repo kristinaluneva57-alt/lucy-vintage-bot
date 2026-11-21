@@ -5797,7 +5797,7 @@ async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(
         f"Привет, {', '.join(names)}! Добро пожаловать в OH MY GOD VINTAGE School 🤍\n\n{where}\n"
         f"Я Люся, помощница школы. Спрашивай меня прямо здесь: «Люся, что такое бакелит?» — "
-        f"или пиши в личку: там твоя шкатулка находок и поиск по книгам."
+        f"или пиши мне в личку — там поиск по книгам и уроки."
     )
 
 
