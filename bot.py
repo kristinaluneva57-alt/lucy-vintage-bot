@@ -64,8 +64,9 @@ BTN_LEARN = "🎓 Учиться"
 BTN_SEARCH = "📚 Найти информацию"
 BTN_NO_MARK = "🚫 Клейма нет"
 
+# Шкатулка в Люсе пока скрыта из меню (21.11.2026): вещи девочки хранят в shkatulka.app,
+# а поиск по фото слишком дорогой для всех. Код и карточки остаются; Кристина открывает её командой /box.
 MAIN_MENU = [
-    [BTN_BOX],
     [BTN_LEARN, BTN_SEARCH],
 ]
 
@@ -89,7 +90,7 @@ LEGACY_BUTTONS = [
 ADD_ITEM_BUTTONS = {"🔎 Определить украшение", "🔎 Добавить украшение"}
 BOX_BUTTONS = {BTN_BOX, "🗃 Моя шкатулка"}
 
-MENU_BUTTONS = set(sum(MAIN_MENU, [])) | set(LEGACY_BUTTONS)
+MENU_BUTTONS = set(sum(MAIN_MENU, [])) | set(LEGACY_BUTTONS) | {BTN_BOX}
 
 ANKETA_KEYS = [
     "front_photo",
@@ -1337,9 +1338,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Привет! Я Люся — помощница OH MY GOD VINTAGE School.\n\n"
         "Сейчас я в бета-версии и умею вот что:\n\n"
-        f"{BTN_BOX} — твоя личная картотека находок для исследования: "
-        "фото, клеймо, размеры и история каждого украшения в одной "
-        "карточке. Карточки видишь только ты.\n"
         f"{BTN_LEARN} — короткие уроки для начинающих.\n"
         f"{BTN_SEARCH} — поиск по книгам нашей библиотеки.\n\n"
         "💬 А ещё можно просто написать мне вопрос о винтажных "
@@ -1713,7 +1711,6 @@ SEARCH_PROMPT = (
 FALLBACK_TEXT = (
     "🙈 Я пока не понимаю свободные вопросы — этому я ещё учусь.\n\n"
     "Сейчас я умею:\n"
-    f"{BTN_BOX} — добавить находку или посмотреть свои\n"
     f"{BTN_LEARN} — короткие уроки\n"
     f"{BTN_SEARCH} — поиск по книгам библиотеки\n\n"
     "Выбери кнопку в меню 👇"
@@ -3152,13 +3149,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE,
             reply_markup=main_keyboard(),
         )
     elif text in BOX_BUTTONS:
-        await update.message.reply_text(
-            BOX_INTRO_TEXT,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(BOX_ADD_TEXT, callback_data="box:add")],
-                [InlineKeyboardButton(BOX_LIST_TEXT, callback_data="box:list")],
-            ]),
-        )
+        await send_box_intro(update.message)
     elif text == "🆘 Найди мне это":
         context.user_data["mode"] = "find"
         await update.message.reply_text(
@@ -5434,6 +5425,22 @@ async def tema_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("Какая это тема?", reply_markup=InlineKeyboardMarkup(rows))
 
 
+async def send_box_intro(message):
+    await message.reply_text(
+        BOX_INTRO_TEXT,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(BOX_ADD_TEXT, callback_data="box:add")],
+            [InlineKeyboardButton(BOX_LIST_TEXT, callback_data="box:list")],
+        ]),
+    )
+
+
+@admin_only
+async def box_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/box — шкатулка внутри Люси (скрыта из меню девочек)."""
+    await send_box_intro(update.message)
+
+
 @admin_only
 async def statya_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/statya — черновики и опубликованные статьи."""
@@ -5870,6 +5877,7 @@ def main():
     app.add_handler(CommandHandler("tema", tema_command))
     app.add_handler(CommandHandler("voprosy", voprosy_command))
     app.add_handler(CommandHandler("statya", statya_command))
+    app.add_handler(CommandHandler("box", box_command))
     app.add_handler(CallbackQueryHandler(sp_callback, pattern=r"^sp:"))
     # Люся в группе: отвечает по упоминанию или на ответ ей; приветствует новеньких.
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS, group_welcome))
