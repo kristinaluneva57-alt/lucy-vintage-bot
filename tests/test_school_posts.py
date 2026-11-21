@@ -408,6 +408,10 @@ class GroupByBooks(InGroup):
 class PostQuality(unittest.TestCase):
     def test_cite_tails_and_photos(self):
         self.assertEqual(school_posts.strip_cites("век.,, [1], [2]\nTrifari [260-265] и"), "век.\nTrifari и")
+        # Запятые-хвосты от перечисленных номеров (статья Lea Stein): «живая»,,. и [3], [4], [5].
+        self.assertEqual(school_posts.strip_cites("текстура «живая»,,. Самые"), "текстура «живая». Самые")
+        self.assertEqual(school_posts.strip_cites("слои [3], [4], [5]. Дальше"), "слои. Дальше")
+        self.assertEqual(school_posts.strip_cites("6–9 см [2], а также [3] кот"), "6–9 см, а также кот")
         title, body = school_posts.parse_post("ЗАГОЛОВОК: Застёжки\nВСТУПЛЕНИЕ: Привет [1]\nФОТО: брошь сзади")
         self.assertNotIn("брошь сзади", body)
         self.assertEqual(school_posts.photo_list("ФОТО: брошь сзади"), ["брошь сзади"])
