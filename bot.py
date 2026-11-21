@@ -5791,9 +5791,9 @@ async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not names:
         return
     start = await asyncio.to_thread(school_posts.get_topic, DB_PATH, "start")
-    where = "Загляни в тему «Старт» — там правила и навигация."
+    where = "Загляни в тему «Главная | Навигация» — там правила и где что лежит."
     if start and start.get("thread_id"):
-        where = f"Загляни в тему «Старт» — там правила и навигация: {school_posts.message_link(start['chat_id'], start['thread_id'])}"
+        where = f"Загляни в тему «Главная | Навигация» — там правила и где что лежит: {school_posts.message_link(start['chat_id'], start['thread_id'])}"
     await message.reply_text(
         f"Привет, {', '.join(names)}! Добро пожаловать в OH MY GOD VINTAGE School 🤍\n\n{where}\n"
         f"Я Люся, помощница школы. Спрашивай меня прямо здесь: «Люся, что такое бакелит?» — "

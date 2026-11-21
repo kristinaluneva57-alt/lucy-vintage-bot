@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 # Темы группы (схема из 13 тем, согласована с Кристиной). slug — короткое имя для кнопок.
 TOPICS = [
-    ("start", "Старт"),
+    ("start", "Главная | Навигация"),
     ("club", "Vintage Club"),
     ("opredelitel", "Определитель"),
     ("klejma", "Архив клейм"),
