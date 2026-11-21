@@ -5532,7 +5532,7 @@ async def sp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Люся в группе: отвечает, когда её отметили или ответили на её сообщение ---
 
-GROUP_FOOTER = "\n\n💌 Своя находка, шкатулка, поиск по книгам — в личке: @{bot}"
+GROUP_FOOTER = "\n\n💌 Поиск по книгам и уроки — в личке: @{bot}"
 
 
 def sp_related_articles(question, limit=2):
